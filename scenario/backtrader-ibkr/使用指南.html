@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17272d">
+  <title>把策略放进历史里｜Vibe-Trading 使用指南</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17272d;
+      --muted: #637378;
+      --paper: #f3f5f1;
+      --white: #fffefa;
+      --line: #d7dfda;
+      --teal: #167f80;
+      --teal-pale: #deefea;
+      --orange: #f16b42;
+      --lime: #d7e66b;
+      --night: #17272d;
+      --serif: "Songti SC", "Noto Serif CJK SC", "STSong", Georgia, serif;
+      --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --page: 1120px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(--sans); line-height: 1.65; }
+    a { color: inherit; }
+    button { font: inherit; }
+    button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible { outline: 3px solid var(--orange); outline-offset: 3px; }
+    .topbar { position: sticky; top: 0; z-index: 10; border-bottom: 1px solid #ffffff25; background: #17272dee; color: #f5f7f2; backdrop-filter: blur(12px); }
+    .topbar-inner { width: min(var(--page), calc(100% - 48px)); margin: auto; height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { display: flex; align-items: center; gap: 11px; text-decoration: none; font-size: 13px; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }
+    .brand-mark { width: 25px; height: 25px; display: grid; place-items: center; color: var(--night); background: var(--lime); border-radius: 50% 50% 50% 4px; font: 700 12px var(--mono); transform: rotate(-12deg); }
+    .brand-mark span { transform: rotate(12deg); }
+    .nav { display: flex; gap: 22px; align-items: center; font-size: 12px; color: #c5d1ce; }
+    .nav a { text-decoration: none; }
+    .nav a:hover { color: var(--lime); }
+    .print-btn { border: 1px solid #ffffff50; padding: 6px 11px; border-radius: 3px; background: transparent; color: white; cursor: pointer; font-size: 12px; }
+    .print-btn:hover { border-color: var(--lime); color: var(--lime); }
+    .mobile-print { display: none; }
+    .progress-track { height: 2px; background: transparent; }
+    .progress-fill { width: 0; height: 100%; background: var(--lime); transition: width .15s linear; }
+
+    .hero { overflow: hidden; color: #f4f6ef; background: var(--night); position: relative; }
+    .hero::after { content: ""; position: absolute; width: 490px; height: 490px; right: -165px; top: -265px; border: 1px solid #ffffff11; border-radius: 50%; box-shadow: 0 0 0 38px #ffffff08, 0 0 0 78px #ffffff06; pointer-events: none; }
+    .hero-inner { position: relative; z-index: 1; width: min(var(--page), calc(100% - 48px)); margin: auto; min-height: 440px; display: grid; grid-template-columns: 1.04fr .96fr; gap: 55px; align-items: center; padding: 62px 0 68px; }
+    .eyebrow { display: flex; align-items: center; gap: 9px; color: var(--lime); text-transform: uppercase; letter-spacing: .16em; font: 11px var(--mono); }
+    .eyebrow::before { content: ""; width: 23px; height: 1px; background: currentColor; }
+    h1 { margin: 21px 0 18px; max-width: 600px; font: 500 clamp(38px, 5vw, 64px)/1.14 var(--serif); letter-spacing: -.045em; }
+    h1 em { color: var(--lime); font-style: normal; }
+    .hero-copy { max-width: 510px; color: #c1cdca; font-size: 15px; line-height: 1.9; }
+    .hero-copy strong { color: #fff; font-weight: 600; }
+    .hero-actions { display: flex; gap: 11px; flex-wrap: wrap; margin-top: 28px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 42px; padding: 0 16px; border: 1px solid transparent; border-radius: 3px; text-decoration: none; font-size: 13px; font-weight: 650; cursor: pointer; }
+    .button-primary { color: var(--night); background: var(--lime); }
+    .button-primary:hover { background: #e4ef98; }
+    .button-quiet { color: #edf2ed; border-color: #ffffff42; background: transparent; }
+    .button-quiet:hover { border-color: #fff; }
+    .hero-caption { margin-top: 18px; color: #899995; font-size: 11px; }
+    .hero-figure { margin: 0; padding: 17px 16px 8px; border: 1px solid #ffffff25; background: #20343a; box-shadow: 14px 14px 0 #0e1b20; }
+    .figure-top { display: flex; justify-content: space-between; align-items: center; padding: 0 4px 10px; color: #afbfbb; font: 10px var(--mono); letter-spacing: .08em; }
+    .live-dot { display: inline-flex; align-items: center; gap: 7px; color: var(--lime); }
+    .live-dot::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 10px currentColor; }
+    .flow-svg { display: block; width: 100%; height: auto; }
+    .flow-node { cursor: pointer; }
+    .flow-node .node-ring { transition: stroke .2s, fill .2s, r .2s; }
+    .flow-node:hover .node-ring, .flow-node.active .node-ring { fill: var(--lime); stroke: var(--lime); }
+    .flow-node:hover .node-number, .flow-node.active .node-number { fill: var(--night); }
+    .flow-node:focus-visible { outline: none; }
+    .flow-node:focus-visible .node-ring { stroke: var(--orange); stroke-width: 3; }
+    .figure-note { min-height: 37px; margin: 2px 4px 4px; color: #d1dcda; font-size: 11px; }
+    .figure-note b { color: var(--lime); font-weight: 600; }
+
+    main { width: min(var(--page), calc(100% - 48px)); margin: auto; }
+    .intro-strip { display: flex; align-items: flex-start; justify-content: space-between; gap: 32px; padding: 24px 0; border-bottom: 1px solid var(--line); }
+    .intro-strip p { max-width: 690px; margin: 0; color: var(--muted); font-size: 13px; }
+    .scope-tag { flex: 0 0 auto; padding: 5px 9px; color: #24615d; border: 1px solid #9fc9ba; background: var(--teal-pale); font: 10px var(--mono); letter-spacing: .05em; }
+    section { scroll-margin-top: 84px; }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin: 68px 0 25px; }
+    .section-kicker { margin-bottom: 8px; color: var(--teal); text-transform: uppercase; letter-spacing: .13em; font: 10px var(--mono); }
+    h2 { margin: 0; font: 500 clamp(27px, 3.4vw, 39px)/1.2 var(--serif); letter-spacing: -.025em; }
+    .section-head p { max-width: 420px; margin: 0; color: var(--muted); font-size: 13px; }
+
+    .choice-layout { display: grid; grid-template-columns: 255px 1fr; border: 1px solid var(--line); background: var(--white); }
+    .choice-menu { padding: 14px; border-right: 1px solid var(--line); background: #edf1ed; }
+    .choice-menu-label { margin: 5px 8px 13px; color: #81908e; text-transform: uppercase; letter-spacing: .12em; font: 9px var(--mono); }
+    .choice-tab { width: 100%; display: flex; gap: 12px; align-items: center; padding: 14px 11px; margin: 0 0 7px; border: 1px solid transparent; background: transparent; color: #536468; text-align: left; cursor: pointer; }
+    .choice-tab[aria-selected="true"] { color: var(--ink); border-color: #c7d6d1; background: var(--white); box-shadow: inset 3px 0 var(--teal); }
+    .choice-icon { width: 29px; height: 29px; flex: 0 0 29px; display: grid; place-items: center; border-radius: 50%; background: #dfe7e2; color: var(--teal); font: 12px var(--mono); }
+    .choice-tab[aria-selected="true"] .choice-icon { color: white; background: var(--teal); }
+    .choice-tab b { display: block; font-size: 13px; }
+    .choice-tab small { display: block; margin-top: 2px; color: #84918e; font-size: 10px; }
+    .choice-content { min-height: 260px; padding: 31px 36px; }
+    .choice-panel[hidden] { display: none; }
+    .choice-panel h3 { margin: 0 0 8px; font: 500 24px var(--serif); }
+    .choice-panel > p { max-width: 650px; margin: 0 0 19px; color: var(--muted); font-size: 13px; }
+    .rule-example { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 13px 14px; color: #eff6f1; background: var(--night); font-size: 13px; }
+    .rule-example code { font: 12px/1.6 var(--sans); }
+    .copy-btn { flex: 0 0 auto; padding: 6px 9px; border: 1px solid #ffffff44; border-radius: 2px; background: transparent; color: var(--lime); font-size: 11px; cursor: pointer; }
+    .copy-btn:hover { border-color: var(--lime); }
+    .chip-row { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 14px; }
+    .chip { padding: 4px 8px; border: 1px solid var(--line); color: #647276; font-size: 10px; }
+    .notice { display: flex; gap: 10px; margin-top: 16px; color: #715941; font-size: 11px; }
+    .notice span { color: var(--orange); font-size: 15px; line-height: 1.2; }
+
+    .checklist { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .check-item { display: flex; gap: 11px; align-items: flex-start; min-height: 82px; padding: 15px 16px; border: 1px solid var(--line); background: var(--white); cursor: pointer; }
+    .check-item:has(input:checked) { border-color: #8fc1b2; background: #f0f7f2; }
+    .check-item input { width: 16px; height: 16px; flex: 0 0 16px; margin: 3px 0 0; accent-color: var(--teal); }
+    .check-item b { display: block; font-size: 12px; }
+    .check-item small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .check-status { display: flex; justify-content: space-between; align-items: center; margin: 12px 0 0; color: var(--muted); font-size: 11px; }
+    .check-meter { width: 100px; height: 4px; background: #dce3de; }
+    .check-meter span { display: block; width: 0; height: 100%; background: var(--teal); transition: width .2s; }
+
+    .steps { position: relative; }
+    .steps::before { content: ""; position: absolute; top: 20px; bottom: 22px; left: 23px; width: 1px; background: #bdcdc6; }
+    .step { position: relative; display: grid; grid-template-columns: 48px minmax(0, 1fr) 220px; gap: 20px; align-items: start; padding: 0 0 26px; }
+    .step:last-child { padding-bottom: 0; }
+    .step-marker { position: relative; z-index: 1; width: 47px; height: 47px; display: grid; place-items: center; border: 1px solid #9bb6ab; border-radius: 50%; color: var(--teal); background: var(--paper); font: 13px var(--mono); }
+    .step-copy { padding: 5px 0 17px; border-bottom: 1px solid var(--line); }
+    .step:last-child .step-copy { border: 0; }
+    .step-copy h3 { margin: 0 0 7px; font-size: 15px; }
+    .step-copy p { max-width: 680px; margin: 0; color: var(--muted); font-size: 12px; }
+    .step-copy p + p { margin-top: 7px; }
+    .step-aside { margin-top: 5px; padding: 10px 12px; border-left: 2px solid var(--orange); background: #f9e9e1; color: #755243; font-size: 10px; }
+    .step-aside b { display: block; margin-bottom: 3px; color: #a04d31; font-size: 10px; }
+    .pill { padding: 1px 5px; border: 1px solid #b6c7c0; border-radius: 2px; color: #38645d; background: #edf5ef; font-size: 10px; white-space: nowrap; }
+    .mini-path { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 25px; border: 1px solid var(--line); background: var(--white); }
+    .mini-path div { position: relative; padding: 13px 13px 13px 35px; color: #536468; font-size: 10px; }
+    .mini-path div + div { border-left: 1px solid var(--line); }
+    .mini-path b { position: absolute; left: 12px; color: var(--teal); font: 11px var(--mono); }
+
+    .result-band { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-top: 70px; color: #f2f5ef; background: var(--night); }
+    .result-band > div { padding: 29px 31px; }
+    .result-band > div + div { border-left: 1px solid #ffffff27; }
+    .result-band h3 { margin: 0 0 8px; color: var(--lime); font: 500 20px var(--serif); }
+    .result-band p { margin: 0; color: #bdcac6; font-size: 12px; }
+    .result-band strong { color: white; }
+
+    .faq-list { border-top: 1px solid var(--line); }
+    details { border-bottom: 1px solid var(--line); }
+    summary { position: relative; padding: 17px 38px 17px 0; list-style: none; font-size: 13px; font-weight: 650; cursor: pointer; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; position: absolute; right: 6px; top: 13px; color: var(--teal); font: 20px var(--mono); }
+    details[open] summary::after { content: "−"; }
+    details p { max-width: 780px; margin: -3px 0 17px; color: var(--muted); font-size: 12px; }
+    .footer { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin-top: 68px; padding: 23px 0 34px; border-top: 1px solid var(--line); color: #7b8987; font-size: 10px; }
+    .footer-links { display: flex; gap: 16px; flex-wrap: wrap; }
+    .footer a { text-decoration-color: #aab6b2; text-underline-offset: 3px; }
+
+    @media (max-width: 760px) {
+      .topbar-inner, main, .hero-inner { width: min(100% - 34px, var(--page)); }
+      .nav { display: none; }
+      .mobile-print { display: inline-flex; }
+      .hero-inner { grid-template-columns: 1fr; gap: 28px; padding: 48px 0 45px; }
+      h1 { max-width: 540px; }
+      .hero-figure { max-width: 560px; }
+      .intro-strip { flex-direction: column; gap: 13px; }
+      .section-head { display: block; margin-top: 52px; }
+      .section-head p { margin-top: 11px; }
+      .choice-layout { grid-template-columns: 1fr; }
+      .choice-menu { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .choice-menu-label { grid-column: 1 / -1; margin-bottom: 2px; }
+      .choice-tab { margin: 0; padding: 10px 8px; }
+      .choice-tab small { font-size: 9px; }
+      .choice-content { padding: 23px 20px; }
+      .step { grid-template-columns: 43px minmax(0, 1fr); gap: 13px; }
+      .step-marker { width: 43px; height: 43px; }
+      .step-aside { grid-column: 2; margin-top: -10px; }
+      .steps::before { left: 21px; }
+      .mini-path { grid-template-columns: 1fr 1fr; }
+      .mini-path div:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
+      .mini-path div:nth-child(4) { border-top: 1px solid var(--line); }
+      .result-band { grid-template-columns: 1fr; }
+      .result-band > div + div { border-left: 0; border-top: 1px solid #ffffff27; }
+    }
+    @media (max-width: 480px) {
+      .hero-inner, main, .topbar-inner { width: calc(100% - 28px); }
+      h1 { font-size: 39px; }
+      .hero-copy { font-size: 13px; }
+      .checklist { grid-template-columns: 1fr; gap: 7px; }
+      .check-item { min-height: 68px; }
+      .rule-example { align-items: flex-start; }
+      .rule-example code { font-size: 11px; }
+      .footer { align-items: flex-start; flex-direction: column; }
+      .figure-note { font-size: 10px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+    }
+    @media print {
+      :root { --paper: white; }
+      .topbar, .hero-actions, .copy-btn, .check-status, .choice-menu, .print-btn { display: none !important; }
+      .hero { color: #111; background: white; border-bottom: 2px solid #17272d; }
+      .hero-inner { min-height: auto; padding: 25px 0; grid-template-columns: 1fr 1fr; }
+      .hero-copy, .hero-caption { color: #444; }
+      .hero-copy strong { color: #111; }
+      .hero-figure { box-shadow: none; print-color-adjust: exact; }
+      .choice-layout { display: block; }
+      .choice-panel[hidden] { display: block !important; margin-bottom: 14px; }
+      .choice-content { padding: 16px; }
+      .section-head { margin-top: 28px; }
+      details p { display: block; }
+      details:not([open]) p { display: block; }
+      .result-band { print-color-adjust: exact; }
+      a { text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top" aria-label="回到指南顶部"><span class="brand-mark"><span>V</span></span> VIBE-TRADING <span style="color:#91a29e;font-weight:400">/ FIELD GUIDE 01</span></a>
+      <nav class="nav" aria-label="页面导航">
+        <a href="#choose">选择方式</a><a href="#prepare">开始前</a><a href="#run">操作步骤</a><a href="#faq">常见问题</a>
+        <button class="print-btn" onclick="window.print()">打印 / 保存 PDF</button>
+      </nav>
+      <button class="print-btn mobile-print" onclick="window.print()">保存 PDF</button>
+    </div>
+    <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="readingProgress"></div></div>
+  </header>
+
+  <div class="hero" id="top">
+    <div class="hero-inner">
+      <div>
+        <div class="eyebrow">IBKR 历史行情 × Backtrader 回测</div>
+        <h1>把策略放进<br><em>历史里</em>跑一遍。</h1>
+        <p class="hero-copy">连接已登录的 IBKR <strong>模拟环境</strong>，取回历史日线，再由 Backtrader 执行离线回测。你可以用文字描述简单策略，也可以上传准备好的 Python 策略文件。</p>
+        <div class="hero-actions"><a class="button button-primary" href="#choose">选择我的使用方式 <span aria-hidden="true">↘</span></a><a class="button button-quiet" href="#prepare">先看开始条件</a></div>
+        <div class="hero-caption">当前指南覆盖历史数据与离线回测；不涉及真实下单。</div>
+      </div>
+      <figure class="hero-figure" aria-labelledby="flow-caption">
+        <div class="figure-top"><span>一笔历史回测的路径</span><span class="live-dot">PAPER · OFFLINE</span></div>
+        <svg class="flow-svg" viewBox="0 0 520 245" role="img" aria-labelledby="flow-title flow-desc">
+          <title id="flow-title">从 IBKR 到回测报告的数据流程图</title>
+          <desc id="flow-desc">IBKR 模拟环境提供历史日线，系统读取并预览数据，Backtrader 进行离线回测，最后生成报告。点击节点可查看说明。</desc>
+          <defs>
+            <pattern id="grid" width="26" height="26" patternUnits="userSpaceOnUse"><path d="M26 0H0V26" fill="none" stroke="#ffffff0b" stroke-width="1"/></pattern>
+            <marker id="arrow" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="none" stroke="#82a39a" stroke-width="1.2"/></marker>
+          </defs>
+          <rect width="520" height="245" fill="url(#grid)"/>
+          <path d="M66 97H448" fill="none" stroke="#82a39a" stroke-dasharray="3 6" marker-end="url(#arrow)"/>
+          <g opacity=".65" stroke="#d7e66b" stroke-width="1">
+            <path d="M88 48v20m-5-14h10m-5 14h10M117 34v27m-5-20h10m-5 20h10M146 54v18m-5-12h10m-5 12h10"/>
+            <path d="M281 142v29m-5-22h10m-5 22h10M310 132v36m-5-26h10m-5 26h10M339 150v25m-5-18h10m-5 18h10M368 126v42m-5-31h10m-5 31h10"/>
+          </g>
+          <g class="flow-node active" data-flow="gateway" role="button" tabindex="0" aria-label="IBKR 模拟环境：点击查看说明">
+            <circle class="node-ring" cx="69" cy="97" r="18" fill="#20343a" stroke="#d7e66b" stroke-width="1.5"/><text class="node-number" x="69" y="101" text-anchor="middle" fill="#d7e66b" font-family="monospace" font-size="11">01</text>
+            <text x="69" y="132" text-anchor="middle" fill="#eff5ef" font-family="sans-serif" font-size="11">IBKR PAPER</text><text x="69" y="148" text-anchor="middle" fill="#93a7a1" font-family="monospace" font-size="9">历史日线</text>
+          </g>
+          <g class="flow-node" data-flow="review" role="button" tabindex="0" aria-label="检查策略和数据预览：点击查看说明">
+            <circle class="node-ring" cx="196" cy="97" r="18" fill="#20343a" stroke="#82a39a" stroke-width="1.5"/><text class="node-number" x="196" y="101" text-anchor="middle" fill="#b6c8c2" font-family="monospace" font-size="11">02</text>
+            <text x="196" y="132" text-anchor="middle" fill="#eff5ef" font-family="sans-serif" font-size="11">检查预览</text><text x="196" y="148" text-anchor="middle" fill="#93a7a1" font-family="monospace" font-size="9">策略 · 日期 · 标的</text>
+          </g>
+          <g class="flow-node" data-flow="engine" role="button" tabindex="0" aria-label="Backtrader 离线回测：点击查看说明">
+            <circle class="node-ring" cx="323" cy="97" r="18" fill="#20343a" stroke="#82a39a" stroke-width="1.5"/><text class="node-number" x="323" y="101" text-anchor="middle" fill="#b6c8c2" font-family="monospace" font-size="11">03</text>
+            <text x="323" y="132" text-anchor="middle" fill="#eff5ef" font-family="sans-serif" font-size="11">Backtrader</text><text x="323" y="148" text-anchor="middle" fill="#93a7a1" font-family="monospace" font-size="9">离线执行</text>
+          </g>
+          <g class="flow-node" data-flow="report" role="button" tabindex="0" aria-label="查看回测报告：点击查看说明">
+            <circle class="node-ring" cx="450" cy="97" r="18" fill="#20343a" stroke="#82a39a" stroke-width="1.5"/><text class="node-number" x="450" y="101" text-anchor="middle" fill="#b6c8c2" font-family="monospace" font-size="11">04</text>
+            <text x="450" y="132" text-anchor="middle" fill="#eff5ef" font-family="sans-serif" font-size="11">回测报告</text><text x="450" y="148" text-anchor="middle" fill="#93a7a1" font-family="monospace" font-size="9">结果可复核</text>
+          </g>
+          <path d="M66 205h390" stroke="#ffffff24"/><text x="67" y="224" fill="#91a39e" font-family="monospace" font-size="9">历史行情 → 策略预览 → 回测计算 → 保存结果</text>
+        </svg>
+        <figcaption class="figure-note" id="flow-caption"><b>01 / IBKR PAPER</b> — Gateway 或 TWS 已登录模拟账户后，系统读取历史日线。</figcaption>
+      </figure>
+    </div>
+  </div>
+
+  <main>
+    <div class="intro-strip">
+      <p>这是一份给使用者的操作指南。先按自己的情况选一条路；页面会让你先看策略与行情预览，再由你确认开始回测。首次体验建议保留 <b>AAPL</b> 示例和页面默认设置。</p>
+      <span class="scope-tag">PAPER · READ-ONLY · BACKTEST</span>
+    </div>
+
+    <section id="choose" aria-labelledby="choose-title">
+      <div class="section-head">
+        <div><div class="section-kicker">先选一条适合自己的路</div><h2 id="choose-title">你准备怎样提供策略？</h2></div>
+        <p>两种入口都会把结果交给 Backtrader 回测。点选左侧选项，查看对应的准备要求。</p>
+      </div>
+      <div class="choice-layout">
+        <div class="choice-menu" role="tablist" aria-label="策略提交方式">
+          <div class="choice-menu-label">选择策略入口</div>
+          <button class="choice-tab" id="tab-plain" role="tab" aria-selected="true" aria-controls="panel-plain" tabindex="0">
+            <span class="choice-icon">Aa</span><span><b>我不写代码</b><small>用文字描述买卖规则</small></span>
+          </button>
+          <button class="choice-tab" id="tab-python" role="tab" aria-selected="false" aria-controls="panel-python" tabindex="-1">
+            <span class="choice-icon">.py</span><span><b>我有 Python 策略</b><small>上传已准备好的文件</small></span>
+          </button>
+        </div>
+        <div class="choice-content">
+          <div class="choice-panel" id="panel-plain" role="tabpanel" aria-labelledby="tab-plain">
+            <h3>把买入和卖出条件写清楚</h3>
+            <p>适合第一次使用或不写代码的人。目前文字入口支持简单的双均线交叉和明确周期的 RSI 阈值策略。复杂过滤条件暂不支持。</p>
+            <div class="rule-example"><code id="strategyExample">5 日均线上穿 20 日均线时买入；5 日均线下穿 20 日均线时卖出。</code><button class="copy-btn" id="copyExample" type="button">复制示例</button></div>
+            <div class="chip-row"><span class="chip">标的：AAPL</span><span class="chip">行情：IBKR 历史日线</span><span class="chip">引擎：Backtrader</span></div>
+            <div class="notice"><span>↳</span><div>系统会先识别策略规则并显示预览。不支持的描述会提示你调整，不会直接进入回测。</div></div>
+          </div>
+          <div class="choice-panel" id="panel-python" role="tabpanel" aria-labelledby="tab-python" hidden>
+            <h3>上传一份已准备好的 .py 文件</h3>
+            <p>适合已经有 Python 策略的人。页面提供的“Python 回调模板”是代码骨架；它不会把文字自动变成 Python 策略。请使用按页面模板接口准备好的文件。</p>
+            <div class="rule-example"><code>你的策略.py　＋　IBKR 日线　＋　交易日历</code><span class="pill">上传前先备好策略</span></div>
+            <div class="chip-row"><span class="chip">无需手工做行情 CSV</span><span class="chip">页面可从 IBKR 获取日线</span><span class="chip">引擎：Backtrader</span></div>
+            <div class="notice"><span>↳</span><div>如果没有策略文件，先用上面的文字入口体验。若页面提示 worker 未配置，请把提示发给维护人员处理。</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="prepare" aria-labelledby="prepare-title">
+      <div class="section-head">
+        <div><div class="section-kicker">开跑前 · 快速确认</div><h2 id="prepare-title">先把这四件事准备好。</h2></div>
+        <p>点击清单可以标记完成。勾选状态只保存在当前浏览器，方便下次接着看。</p>
+      </div>
+      <div class="checklist" id="checklist">
+        <label class="check-item"><input type="checkbox" data-check="gateway"><span><b>IBKR 已登录 PAPER 模拟账户</b><small>Gateway 或 TWS 保持打开并已登录。</small></span></label>
+        <label class="check-item"><input type="checkbox" data-check="connection"><span><b>知道当前使用 Gateway 还是 TWS</b><small>Gateway 通常用 4002；TWS 通常用 7497。</small></span></label>
+        <label class="check-item"><input type="checkbox" data-check="symbol"><span><b>准备好股票代码和日期</b><small>首次可用 AAPL 和较短的历史区间。</small></span></label>
+        <label class="check-item"><input type="checkbox" data-check="strategy"><span><b>选好了策略提交方式</b><small>文字规则，或准备好的 Python 文件。</small></span></label>
+      </div>
+      <div class="check-status"><span id="checkLabel" aria-live="polite">已完成 0 / 4 项</span><span class="check-meter" aria-hidden="true"><span id="checkMeter"></span></span></div>
+    </section>
+
+    <section id="run" aria-labelledby="run-title">
+      <div class="section-head">
+        <div><div class="section-kicker">操作流程 · 两种入口共用后半段</div><h2 id="run-title">从登录到报告，按顺序走。</h2></div>
+        <p>按钮名称可能随页面版本略有变化。以页面实际显示为准；拿不准的高级参数先保留默认值。</p>
+      </div>
+      <div class="steps">
+        <article class="step" data-step="gateway">
+          <div class="step-marker">01</div><div class="step-copy"><h3>打开 IBKR 模拟环境，并进入策略执行</h3><p>启动 IBKR Gateway 或 TWS，登录 <b>PAPER 模拟账户</b> 并保持运行。打开 Vibe-Trading，在左侧导航选择 <span class="pill">策略执行 / Execution</span>。首次使用先在连接中心检查 IBKR 连接。</p></div><aside class="step-aside"><b>连接端口</b>Gateway 通常为 4002；TWS 通常为 7497。不要把 LIVE 端口当作 PAPER。</aside>
+        </article>
+        <article class="step" data-step="review">
+          <div class="step-marker">02</div><div class="step-copy"><h3>选择策略入口，填写标的和日期</h3><p>文字入口填写买卖规则；Python 入口上传已准备的 <code>.py</code> 文件。两种入口都要选择 IBKR 本地连接、PAPER 配置，以及当前登录所用的 Gateway/TWS 端口。首次可以先保留 AAPL 示例。</p><p>Python 入口需要设置暖机日期和评估日期；暖机日期应早于评估日期。页面可用 IBKR 日线自动填入行情和交易日历。</p></div><aside class="step-aside"><b>不熟悉的设置</b>先保留页面预填的费用、滑点和行情字段，不要凭猜测修改。</aside>
+        </article>
+        <article class="step" data-step="review">
+          <div class="step-marker">03</div><div class="step-copy"><h3>先预览，再检查关键信息</h3><p>文字入口选择 <span class="pill">预览策略规则</span>；Python 入口先选择 <span class="pill">从 IBKR 获取日线</span>，上传策略后选择 <span class="pill">校验并预览上传内容</span>。阅读页面预览，确认规则、标的、行情来源、日期范围和数据数量符合预期。</p><p>如果页面提示策略不受支持、数据不足或日期不完整，按提示调整规则或日期后重新预览。</p></div><aside class="step-aside"><b>这是你的检查点</b>信息不对就先返回修改；确认前不会运行这次回测。</aside>
+        </article>
+        <article class="step" data-step="engine">
+            <div class="step-marker">04</div><div class="step-copy"><h3>确认运行离线回测</h3><p>检查无误后，点击页面的确认按钮：文字入口通常显示 <span class="pill">确认并运行离线回测</span>；Python 入口通常显示 <span class="pill">确认并运行 Backtrader</span>。系统使用 IBKR 历史日线，由 Backtrader 计算这次策略回测。</p></div><aside class="step-aside"><b>本流程不发订单</b>这是历史数据回测，不会向 IBKR 提交买卖订单。</aside>
+        </article>
+        <article class="step" data-step="report">
+          <div class="step-marker">05</div><div class="step-copy"><h3>打开报告，理解结果边界</h3><p>在结果区域查看收益、费用等回测指标及报告完整性状态。报告链接会打开已保存的运行详情，方便之后复核。</p><p>报告完整性通过说明报告与系统回放校验一致；它不能证明策略未来盈利，也不代表行情复权、历史可用时点或数据许可已认证。</p></div><aside class="step-aside"><b>可复核 ≠ 有收益保证</b>历史表现用于研究，不是未来表现承诺。</aside>
+        </article>
+      </div>
+      <div class="mini-path" aria-label="流程摘要"><div><b>01</b>登录 PAPER</div><div><b>02</b>填写策略与标的</div><div><b>03</b>检查预览</div><div><b>04</b>运行并看报告</div></div>
+    </section>
+
+    <div class="result-band" aria-label="功能范围说明">
+      <div><h3>现在可以做什么</h3><p>使用 IBKR <strong>历史日线</strong>作为数据源，在 Vibe-Trading 中运行 Backtrader 离线回测；可以使用受支持的文字策略入口，也可以提交已准备好的 Python 策略。</p></div>
+      <div><h3>哪些事情另行处理</h3><p>真实交易仍暂缓。账户持仓查询、订单预演、PAPER 下单和实时行情是其他流程；这份指南中的回测<strong>不会提交订单</strong>。AAPL 实时行情还可能受 IBKR 行情订阅限制。</p></div>
+    </div>
+
+    <section id="faq" aria-labelledby="faq-title">
+      <div class="section-head">
+        <div><div class="section-kicker">遇到问题时</div><h2 id="faq-title">常见问题</h2></div>
+        <p>点开问题查看下一步。联系维护人员时，提供页面错误文字即可；不要发送密码或验证码。</p>
+      </div>
+      <div class="faq-list">
+        <details><summary>IBKR 连接失败，先检查什么？</summary><p>确认 Gateway 或 TWS 正在运行并已登录 PAPER；再核对连接配置和端口是否匹配：Gateway 通常为 4002，TWS 通常为 7497。若仍失败，把页面显示的错误文字发给维护人员。</p></details>
+        <details><summary>为什么没有获取到行情？</summary><p>先检查股票代码和日期范围，尝试缩短日期区间。不同标的和历史时段的可用数据可能不同；部分行情也受 IBKR 市场数据权限影响。</p></details>
+        <details><summary>为什么文字策略提示不支持？</summary><p>文字入口目前支持双均线交叉或明确周期的 RSI 阈值规则。用清楚的买入、卖出条件描述，暂时去掉其他过滤条件；或者请维护人员准备 Python 策略文件。</p></details>
+        <details><summary>上传 Python 后无法预览或运行怎么办？</summary><p>先确认上传的是按页面模板接口准备的 .py 策略文件。若提示 worker 未配置、日历或数据有误，请把页面错误文字发给维护人员。日常使用者不需要自行配置 Docker 或环境变量。</p></details>
+        <details><summary>这次回测会在 IBKR 里买卖吗？</summary><p>不会。这份指南覆盖的是读取历史日线并离线运行 Backtrader。账户查询、订单预演及任何下单操作都不在这里的流程里；真实交易尚未开放。</p></details>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div>Vibe-Trading × Backtrader × IBKR<br>使用范围：本地 PAPER 历史数据与离线回测</div>
+      <div class="footer-links"><a href="USAGE.md">文字版使用说明</a><a href="GOAL_AND_STATUS.md">目标与进度记录</a><a href="DEPLOYMENT.md">维护人员部署说明</a></div>
+    </footer>
+  </main>
+
+  <script>
+    (() => {
+      const tabs = [...document.querySelectorAll('.choice-tab')];
+      const panels = [...document.querySelectorAll('.choice-panel')];
+      function selectTab(tab, focus = false) {
+        tabs.forEach((item, index) => {
+          const selected = item === tab;
+          item.setAttribute('aria-selected', String(selected));
+          item.tabIndex = selected ? 0 : -1;
+          panels[index].hidden = !selected;
+        });
+        if (focus) tab.focus();
+      }
+      tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => selectTab(tab));
+        tab.addEventListener('keydown', event => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+          selectTab(tabs[next], true);
+        });
+      });
+
+      const flowNotes = {
+        gateway: '<b>01 / IBKR PAPER</b> — Gateway 或 TWS 已登录模拟账户后，系统读取历史日线。',
+        review: '<b>02 / 检查预览</b> — 先核对策略规则、标的、日期、行情来源和日线数量。',
+        engine: '<b>03 / BACKTRADER</b> — 你确认后，系统在本地流程中执行离线回测，不发送订单。',
+        report: '<b>04 / 回测报告</b> — 查看指标和报告完整性状态，再打开已保存的运行详情。'
+      };
+      const flowNodes = [...document.querySelectorAll('.flow-node')];
+      function selectFlow(node) {
+        flowNodes.forEach(item => item.classList.toggle('active', item === node));
+        document.getElementById('flow-caption').innerHTML = flowNotes[node.dataset.flow];
+      }
+      flowNodes.forEach(node => {
+        node.addEventListener('click', () => selectFlow(node));
+        node.addEventListener('keydown', event => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectFlow(node); }
+        });
+      });
+
+      const checks = [...document.querySelectorAll('[data-check]')];
+      const storageKey = 'vibe-trading-guide-checklist-v1';
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
+        checks.forEach(box => { box.checked = Boolean(saved[box.dataset.check]); });
+      } catch (_) { /* 浏览器禁用本地存储时，清单仍可在本页使用。 */ }
+      function updateChecks() {
+        const count = checks.filter(box => box.checked).length;
+        document.getElementById('checkLabel').textContent = `已完成 ${count} / ${checks.length} 项`;
+        document.getElementById('checkMeter').style.width = `${count / checks.length * 100}%`;
+        try { localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(checks.map(box => [box.dataset.check, box.checked])))); } catch (_) { /* 忽略存储权限限制。 */ }
+      }
+      checks.forEach(box => box.addEventListener('change', updateChecks));
+      updateChecks();
+
+      document.getElementById('copyExample').addEventListener('click', async event => {
+        const button = event.currentTarget;
+        try {
+          await navigator.clipboard.writeText(document.getElementById('strategyExample').textContent);
+          button.textContent = '已复制';
+          window.setTimeout(() => { button.textContent = '复制示例'; }, 1600);
+        } catch (_) {
+          button.textContent = '请手动复制';
+        }
+      });
+
+      const progress = document.getElementById('readingProgress');
+      function updateProgress() {
+        const max = document.documentElement.scrollHeight - window.innerHeight;
+        progress.style.width = `${max > 0 ? Math.min(100, window.scrollY / max * 100) : 0}%`;
+      }
+      window.addEventListener('scroll', updateProgress, { passive: true });
+      window.addEventListener('resize', updateProgress);
+      updateProgress();
+    })();
+  </script>
+</body>
+</html>
