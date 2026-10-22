@@ -24,6 +24,7 @@ from src.providers.capabilities import (
     get_llm_credentials,
     get_provider_capabilities,
 )
+from src.providers.model_profiles import get_model_profile
 
 try:
     from dotenv import load_dotenv
@@ -1425,6 +1426,8 @@ def _sync_provider_env() -> None:
     # SDK-side env setup, not Vibe-Trading config reads
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
+    elif provider == "custom":
+        os.environ.pop("OPENAI_API_KEY", None)
     if base_url:
         os.environ["OPENAI_API_BASE"] = base_url
         os.environ["OPENAI_BASE_URL"] = base_url
@@ -1649,10 +1652,25 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
     temperature = get_env_config().llm.langchain_temperature
     provider = get_env_config().llm.langchain_provider.lower()
     caps = get_provider_capabilities(provider, name)
+    creds = get_llm_credentials(provider, name)
+    model_profile = get_model_profile(provider, creds.get("base_url") or "", name)
+
+    def configured_effort() -> str:
+        effort = get_env_config().llm.langchain_reasoning_effort.strip().lower()
+        if model_profile is None:
+            return effort
+        if not model_profile.supports_reasoning:
+            return ""
+        if effort == "none":
+            return effort
+        if effort not in model_profile.reasoning_efforts:
+            return ""
+        return effort
+
     if provider in {"openai-codex", "openai_codex"}:
         from src.providers.openai_codex import OpenAICodexLLM
 
-        effort = get_env_config().llm.langchain_reasoning_effort.strip().lower()
+        effort = configured_effort()
         return OpenAICodexLLM(
             model=name,
             temperature=temperature,
@@ -1706,11 +1724,10 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
     ):
         logger.info("Forcing temperature=1.0 for %s (provider requirement)", name)
         temperature = 1.0
-    effort = get_env_config().llm.langchain_reasoning_effort.strip().lower()
+    effort = configured_effort()
     # Moonshot/DeepSeek official APIs emit reasoning by default and ignore this field.
     configured_responses_api = get_env_config().llm.langchain_use_responses_api
     use_responses_api = uses_responses_api(provider, configured_responses_api)
-    creds = get_llm_credentials(provider, name)
     api_key = creds["api_key"]
     _validate_authorization_credential(
         api_key,

@@ -188,6 +188,9 @@ _PROVIDERS: dict[str, ProviderCapabilities] = {
         "OPENAI_BASE_URL",
         top_level_reasoning_effort=True,
     ),
+    # A user-supplied Chat Completions endpoint. Keep all optional wire
+    # extensions off until a profile or provider-specific adapter verifies them.
+    "custom": ProviderCapabilities("custom", "CUSTOM_API_KEY", "CUSTOM_BASE_URL"),
     "anthropic": ProviderCapabilities(
         "anthropic",
         "ANTHROPIC_API_KEY",
@@ -389,7 +392,10 @@ def get_llm_credentials(
     caps = get_provider_capabilities(provider, model)
     key_env, base_env = caps.api_key_env, caps.base_url_env
 
-    if key_env is not None:
+    if caps.name == "custom":
+        # Never send an OpenAI credential to an arbitrary custom endpoint.
+        api_key = os.getenv("CUSTOM_API_KEY", "")
+    elif key_env is not None:
         api_key = os.getenv(  # noqa: env-gate
             key_env, ""
         ) or os.getenv(  # noqa: env-gate — dynamic provider key fallback
@@ -404,20 +410,16 @@ def get_llm_credentials(
     if caps.name == "copilot" and not api_key:
         api_key = _gh_cli_token()
 
-    base_url = (
-        (
-            os.getenv(base_env, "")  # noqa: env-gate — dynamic provider URL chain
-            if base_env
-            else ""
+    configured_base_url = os.getenv(base_env, "") if base_env else ""  # noqa: env-gate
+    if caps.name == "custom":
+        base_url = configured_base_url or _provider_default_base_url(caps.name)
+    else:
+        base_url = (
+            configured_base_url
+            or os.getenv("OPENAI_BASE_URL", "")  # noqa: env-gate
+            or os.getenv("OPENAI_API_BASE", "")  # noqa: env-gate
+            or _provider_default_base_url(caps.name)
         )
-        or os.getenv(  # noqa: env-gate — dynamic provider URL chain
-            "OPENAI_BASE_URL", ""
-        )
-        or os.getenv(  # noqa: env-gate — dynamic provider URL chain
-            "OPENAI_API_BASE", ""
-        )
-        or _provider_default_base_url(caps.name)
-    )
     if caps.name == "ollama":
         base_url = base_url.strip().rstrip("/")
         if base_url and not base_url.endswith("/v1"):

@@ -41,9 +41,11 @@ const CONNECTOR_PORTFOLIO_PROMPT =
   "Use the selected trading connector profile to summarize my account, positions, concentration, cash, and portfolio risk. Do not place or modify orders.";
 
 const ACCEPTED_FILE_TYPES =
-  ".pdf,.docx,.xlsx,.xls,.pptx,.csv,.tsv,.txt,.md,.log,.json,.toml,.html,.xml,.rst,.png,.jpg,.jpeg,.gif,.bmp,.webp,.tiff";
+  ".pdf,.docx,.xlsx,.xls,.pptx,.csv,.tsv,.txt,.md,.log,.json,.toml,.html,.xml,.rst,.png,.jpg,.jpeg,.gif,.bmp,.webp,.tif,.tiff";
 const MAX_ATTACHMENT_COUNT = 5;
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+const IMAGE_EXTENSION = /\.(png|jpe?g|gif|bmp|webp|tiff?)$/i;
 const BLOCKED_EXTENSIONS = [
   ".exe", ".msi", ".bat", ".cmd", ".com", ".scr", ".app", ".dmg",
   ".so", ".dll", ".dylib", ".py", ".pyw", ".sh", ".bash", ".zsh",
@@ -169,6 +171,10 @@ export const Composer = memo(forwardRef<ComposerHandle, Props>(function Composer
       }
       if (file.size > MAX_FILE_SIZE) {
         toast.error(t("agent.fileSizeExceeds"));
+        return false;
+      }
+      if (IMAGE_EXTENSION.test(lowered) && file.size > MAX_IMAGE_SIZE) {
+        toast.error(t("agent.imageSizeExceeds", { defaultValue: "Images must be 10 MB or smaller." }));
         return false;
       }
       return true;

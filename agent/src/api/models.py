@@ -65,6 +65,12 @@ class RunResponse(BaseModel):
     planner_output: Optional[Dict[str, Any]] = Field(None, description="Planner output")
     strategy_spec: Optional[Dict[str, Any]] = Field(None, description="Strategy specification")
     rag_selection: Optional[RAGSelection] = Field(None, description="Selected RAG metadata")
+    execution_backend: Optional[str] = Field(None, description="Execution implementation family")
+    execution_mode: Optional[str] = Field(None, description="Execution mode, such as backtest or paper")
+    strategy_version_id: Optional[str] = Field(None, description="Immutable strategy version identifier")
+    strategy_version_hash: Optional[str] = Field(None, description="Immutable strategy version hash")
+    execution_report: Optional[Dict[str, Any]] = Field(None, description="Backtrader execution report")
+    execution_report_integrity: Optional[Dict[str, Any]] = Field(None, description="Persisted Backtrader report integrity status")
 
     metrics: Optional[BacktestMetrics] = Field(None, description="Backtest metrics")
     artifacts: List[Artifact] = Field(default_factory=list, description="Run artifacts")

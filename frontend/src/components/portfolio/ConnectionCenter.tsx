@@ -11,7 +11,7 @@ interface Props {
 }
 
 const fieldClass = "w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20";
-type TestResult = { ok: boolean; message: string };
+type TestResult = { ok: boolean; message: string; details?: string };
 
 /**
  * Drawer for the connections that exist only on this computer: create one from
@@ -77,7 +77,7 @@ export function ConnectionCenter({ open, onClose, onChanged }: Props) {
     }
   }
 
-  async function test(connection: LocalConnection) {
+  async function test(connection: LocalConnection, port?: 4001 | 4002 | 7496 | 7497) {
     setBusy(`test:${connection.id}`);
     setTestResults((current) => {
       const next = { ...current };
@@ -85,11 +85,27 @@ export function ConnectionCenter({ open, onClose, onChanged }: Props) {
       return next;
     });
     try {
-      const result = await api.checkConnection(connection.id);
+      const result = await api.checkConnection(connection.id, port);
       const ok = result.report.status === "ok" || result.report.configured === true;
       const error = typeof result.report.error === "string"
         ? result.report.error
         : t("portfolio.connections.unknownTestError");
+      const target = result.report.target && typeof result.report.target === "object"
+        ? result.report.target as Record<string, unknown> : {};
+      const account = result.report.account && typeof result.report.account === "object"
+        ? result.report.account as Record<string, unknown> : {};
+      const accounts = Array.isArray(account.accounts)
+        ? account.accounts.map((value) => {
+          const raw = String(value);
+          return raw.length > 4 ? `${raw.slice(0, 1)}••••${raw.slice(-4)}` : "••••";
+        }).join(", ")
+        : "—";
+      const endpoint = typeof target.host === "string" && typeof target.port === "number"
+        ? `${target.host}:${target.port}` : "—";
+      const environment = result.report.environment === "paper" ? "PAPER" : "LIVE";
+      const readonly = result.report.readonly === true
+        || (result.report.config && typeof result.report.config === "object"
+          && (result.report.config as Record<string, unknown>).readonly === true);
       setTestResults((current) => ({
         ...current,
         [connection.id]: {
@@ -97,6 +113,10 @@ export function ConnectionCenter({ open, onClose, onChanged }: Props) {
           message: ok
             ? t("portfolio.connections.testOk", { label: connection.label })
             : t("portfolio.connections.testFailed", { label: connection.label, error }),
+          details: ok ? t("portfolio.connections.testEvidence", {
+            environment, endpoint, accountCount: Array.isArray(account.accounts) ? account.accounts.length : 0,
+            accounts, readonly: readonly ? t("portfolio.connections.readOnly") : t("portfolio.connections.notReadOnly"),
+          }) : undefined,
         },
       }));
     } catch (error) {
@@ -166,9 +186,10 @@ export function ConnectionCenter({ open, onClose, onChanged }: Props) {
   </div>;
 }
 
-function ConnectionCard({ connection, busy, testResult, onTest, onDelete, onSaved, setBusy, setMessage }: { connection: LocalConnection; busy: string | null; testResult?: TestResult; onTest: (connection: LocalConnection) => Promise<void>; onDelete: (connection: LocalConnection) => Promise<void>; onSaved: () => Promise<void>; setBusy: (value: string | null) => void; setMessage: (value: string | null) => void }) {
+function ConnectionCard({ connection, busy, testResult, onTest, onDelete, onSaved, setBusy, setMessage }: { connection: LocalConnection; busy: string | null; testResult?: TestResult; onTest: (connection: LocalConnection, port?: 4001 | 4002 | 7496 | 7497) => Promise<void>; onDelete: (connection: LocalConnection) => Promise<void>; onSaved: () => Promise<void>; setBusy: (value: string | null) => void; setMessage: (value: string | null) => void }) {
   const { t } = useTranslation();
   const [values, setValues] = useState<Record<string, string>>({});
+  const [ibkrPort, setIbkrPort] = useState<4001 | 4002 | 7496 | 7497>(connection.environment === "paper" ? 4002 : 4001);
   async function saveCredentials() {
     setBusy(`credentials:${connection.id}`);
     setMessage(null);
@@ -188,8 +209,9 @@ function ConnectionCard({ connection, busy, testResult, onTest, onDelete, onSave
     {connection.onboarding ? <SetupContract onboarding={connection.onboarding} /> : null}
     {connection.account_selection_required ? <AccountSelector connection={connection} busy={busy} setBusy={setBusy} setMessage={setMessage} onSaved={onSaved} /> : null}
     {connection.credential_fields.length ? <div className="mt-4 grid gap-2 sm:grid-cols-2">{connection.credential_fields.map((field) => <label key={field.name} className="text-xs text-muted-foreground">{field.label}{field.required ? <span className="ml-1 text-danger">*</span> : <span className="ml-1">{t("portfolio.connections.optional")}</span>}{connection.credential_status[field.name] ? <span className="ml-1 text-positive">{t("portfolio.connections.credentialSaved")}</span> : null}<input type={field.secret ? "password" : "text"} value={values[field.name] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [field.name]: event.target.value }))} className={`mt-1 ${fieldClass}`} placeholder={connection.credential_status[field.name] ? "••••••••" : ""} autoComplete="off" /></label>)}</div> : <p className="mt-3 text-xs text-muted-foreground">{connection.transport === "remote_mcp" ? t("portfolio.connections.oauthNote") : t("portfolio.connections.localNote")}</p>}
-    <div className="mt-4 flex flex-wrap gap-2">{connection.credential_fields.length ? <button type="button" onClick={() => void saveCredentials()} disabled={busy === `credentials:${connection.id}` || !Object.values(values).some(Boolean)} className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs disabled:opacity-40"><ShieldCheck className="h-3.5 w-3.5" />{t("portfolio.connections.saveVault")}</button> : null}<button type="button" onClick={() => void onTest(connection)} disabled={busy === `test:${connection.id}`} className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs">{busy === `test:${connection.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlugZap className="h-3.5 w-3.5" />}{t("portfolio.connections.test")}</button><button type="button" onClick={() => void onDelete(connection)} disabled={busy === `delete:${connection.id}`} className="ml-auto inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs text-danger hover:bg-danger/10"><Trash2 className="h-3.5 w-3.5" />{t("portfolio.connections.delete")}</button></div>
-    {testResult ? <div role="status" className={`mt-3 rounded-md border px-3 py-2 text-xs ${testResult.ok ? "border-positive/30 bg-positive/5 text-positive" : "border-danger/30 bg-danger/5 text-danger"}`}>{testResult.message}</div> : null}
+    {connection.connector === "ibkr" && connection.transport === "local_tws" ? <label className="mt-4 block max-w-sm text-xs text-muted-foreground">{t("portfolio.connections.ibkrSocket")}<select className={`mt-1 ${fieldClass}`} value={ibkrPort} onChange={(event) => setIbkrPort(Number(event.target.value) as typeof ibkrPort)}>{connection.environment === "paper" ? <><option value={4002}>IB Gateway PAPER · 4002</option><option value={7497}>TWS PAPER · 7497</option></> : <><option value={4001}>IB Gateway LIVE · 4001 (read-only)</option><option value={7496}>TWS LIVE · 7496 (read-only)</option></>}</select></label> : null}
+    <div className="mt-4 flex flex-wrap gap-2">{connection.credential_fields.length ? <button type="button" onClick={() => void saveCredentials()} disabled={busy === `credentials:${connection.id}` || !Object.values(values).some(Boolean)} className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs disabled:opacity-40"><ShieldCheck className="h-3.5 w-3.5" />{t("portfolio.connections.saveVault")}</button> : null}<button type="button" onClick={() => void onTest(connection, connection.connector === "ibkr" && connection.transport === "local_tws" ? ibkrPort : undefined)} disabled={busy === `test:${connection.id}`} className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs">{busy === `test:${connection.id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlugZap className="h-3.5 w-3.5" />}{t("portfolio.connections.test")}</button><button type="button" onClick={() => void onDelete(connection)} disabled={busy === `delete:${connection.id}`} className="ml-auto inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs text-danger hover:bg-danger/10"><Trash2 className="h-3.5 w-3.5" />{t("portfolio.connections.delete")}</button></div>
+    {testResult ? <div role="status" className={`mt-3 rounded-md border px-3 py-2 text-xs ${testResult.ok ? "border-positive/30 bg-positive/5 text-positive" : "border-danger/30 bg-danger/5 text-danger"}`}><div>{testResult.message}</div>{testResult.details ? <div className="mt-1 opacity-80">{testResult.details}</div> : null}</div> : null}
     {connection.credentials_configured ? <div className="mt-3 flex items-center gap-1.5 text-xs text-positive"><CheckCircle2 className="h-3.5 w-3.5" />{t("portfolio.connections.configured")}</div> : null}
   </article>;
 }

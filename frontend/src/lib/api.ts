@@ -97,6 +97,78 @@ export interface PortfolioPosition {
   price_error?: string;
 }
 
+export interface PaperExecutionStatus {
+  configured: boolean;
+  runtime_factory_registered: boolean;
+  composition_ready: boolean;
+  missing_requirements: string[];
+  phase: string;
+  control_state: string | null;
+  dispatch_gate_open: boolean;
+  owner_lease_held: boolean;
+  reason: string | null;
+  last_error_code: string | null;
+  strategy_version_id?: string | null;
+}
+
+export interface PaperExecutionActivity {
+  broker: string;
+  environment: string;
+  control_state: string;
+  control_reason: string | null;
+  history_limit: number;
+  latest_activity_seq: number;
+  orders: Array<{
+    intent_id: string;
+    created_at: string;
+    updated_at: string;
+    state: string;
+    reserved_amount: string;
+    filled_qty: number;
+    remaining_qty: number;
+    average_fill_price: string | null;
+    broker_order_id: number | null;
+    attempt_id: string | null;
+    intent: {
+      instrument_id: string;
+      side: string;
+      integer_qty: number;
+      order_type: string;
+      time_in_force: string;
+      reference_price: string;
+    };
+    fills: Array<{ broker_exec_id: string; quantity: number; price: string; occurred_at: string }>;
+    fees: Array<{
+      fee_fact_id: string;
+      broker_exec_id: string;
+      amount: string;
+      currency: string;
+      received_at: string;
+      association_status: string;
+      review_status: string;
+      amount_status: string;
+    }>;
+  }>;
+  recovery: {
+    ready_to_reserve: number;
+    ready_to_send: number;
+    unresolved_sends: number;
+    active_orders: number;
+  };
+  risk: {
+    source: string;
+    reserved_cash: string;
+    reserved_sell_shares: number;
+    risk_limits: string;
+  };
+  positions: {
+    source: string;
+    as_of: string | null;
+    positions: Array<{ instrument_id: string; quantity: number; average_cost: number | null; currency: string }>;
+    reason: string | null;
+  };
+}
+
 export interface PortfolioConnectorCompatibility {
   level: "native" | "contract_tested" | "experimental";
   contract_version: number;
@@ -166,6 +238,19 @@ export interface PortfolioSnapshot {
   }>;
   /** Backend-authored English notes; rendered verbatim, not translated. */
   warnings: string[];
+}
+
+export interface StrategyClarificationForm {
+  schema_version: "strategy-clarification/1";
+  status: "needs_clarification" | "unsupported";
+  question: string;
+  missing_fields: Array<{ name: string; label: string }>;
+}
+
+export interface StrategyClarificationTranscriptCursor {
+  transcript_id: string;
+  turn_id: string;
+  turn_count: number;
 }
 
 export interface PortfolioHistoryPoint {
@@ -394,6 +479,11 @@ export const api = {
       `/correlation/regime?codes=${encodeURIComponent(codes)}&days=${encodeURIComponent(String(days))}`,
     ),
   getPortfolio: () => request<{ status: string; snapshot: PortfolioSnapshot | null }>("/api/portfolio"),
+  getPaperExecutionStatus: () => request<PaperExecutionStatus>("/api/execution/paper/status"),
+  getPaperExecutionActivity: () => request<PaperExecutionActivity>("/api/execution/paper/activity?limit=50"),
+  paperExecutionActivityEventsUrl: (afterSeq: number) =>
+    `${BASE}/api/execution/paper/activity/events?after_seq=${encodeURIComponent(String(afterSeq))}`,
+  pausePaperExecution: () => request<PaperExecutionStatus>("/api/execution/paper/pause", { method: "POST" }),
   refreshPortfolio: () => request<{ status: string; snapshot: PortfolioSnapshot }>("/api/portfolio/refresh", { method: "POST" }),
   getPortfolioRefreshStatus: () => request<{ status: string; refresh: PortfolioRefreshState }>("/api/portfolio/refresh-status"),
   reconnectPortfolioSource: (sourceId: string) =>
@@ -417,10 +507,10 @@ export const api = {
       `/api/connections/${encodeURIComponent(connectionId)}/credentials`,
       { method: "POST", body: JSON.stringify({ values }) },
     ),
-  checkConnection: (connectionId: string) =>
+  checkConnection: (connectionId: string, port?: 4001 | 4002 | 7496 | 7497) =>
     request<{ status: string; connection_id: string; report: Record<string, unknown> }>(
       `/api/connections/${encodeURIComponent(connectionId)}/check`,
-      { method: "POST" },
+      { method: "POST", ...(port === undefined ? {} : { body: JSON.stringify({ port }) }) },
     ),
   getConnectionAccounts: (connectionId: string) =>
     request<{ status: string; connection_id: string; account_ref: string; accounts: BrokerAccountChoice[] }>(
@@ -444,6 +534,145 @@ export const api = {
     return response.blob();
   },
   listRuns: (limit?: number) => request<RunListItem[]>(`/runs${limit ? `?limit=${encodeURIComponent(String(limit))}` : ""}`),
+  previewExecutionBacktest: (body: {
+    symbol: string;
+    instrument_id: string;
+    start_date: string;
+    end_date: string;
+    source: "yfinance" | "stooq" | "ibkr";
+    ibkr_profile_id?: "ibkr-paper-local" | "ibkr-live-local-readonly";
+    ibkr_port?: 4001 | 4002 | 7496 | 7497;
+    strategy_description: string;
+    allocation_fraction: number;
+    clarification_transcript_id?: string;
+    clarification_turn_id?: string;
+    clarification_parent_turn_id?: string;
+    clarification_answer?: string;
+  }) => request<{
+    supported: boolean;
+    review_hash?: string;
+    preview_token?: string;
+    template_source_sha256?: string;
+    compiler_version?: string;
+    strategy_spec?: Record<string, unknown>;
+    summary?: Record<string, unknown>;
+    warnings?: string[];
+    clarification?: string;
+    clarification_form?: StrategyClarificationForm;
+    clarification_transcript?: StrategyClarificationTranscriptCursor;
+    reason?: string;
+  }>("/runs/backtests/preview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
+  createExecutionBacktest: (body: {
+    symbol: string;
+    instrument_id: string;
+    start_date: string;
+    end_date: string;
+    source: "yfinance" | "stooq" | "ibkr";
+    ibkr_profile_id?: "ibkr-paper-local" | "ibkr-live-local-readonly";
+    ibkr_port?: 4001 | 4002 | 7496 | 7497;
+    strategy_description: string;
+    allocation_fraction: number;
+    preview_token?: string;
+  }) => request<{ run_id: string; status: string; execution_report: Record<string, unknown> }>("/runs/backtests", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
+  previewIbkrPythonMarketData: (body: {
+    symbol: string;
+    instrument_id: string;
+    profile_id: "ibkr-paper-local" | "ibkr-live-local-readonly";
+    port?: 4001 | 4002 | 7496 | 7497;
+    warmup_start: string;
+    warmup_end: string;
+    evaluation_start: string;
+    evaluation_end: string;
+  }) => request<{
+    supported: boolean;
+    reason?: string;
+    symbol?: string;
+    bar_count?: number;
+    market_data_csv?: string;
+    market_data_metadata?: Record<string, unknown>;
+    expected_sessions?: Array<{
+      session_date: string;
+      open_at: string;
+      close_at: string;
+      early_close?: boolean;
+    }>;
+    provenance?: Record<string, unknown>;
+    warnings?: string[];
+  }>("/runs/market-data/ibkr/python-upload-preview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
+  previewPythonUploadBacktest: (body: {
+    strategy_id: string;
+    instrument_id: string;
+    strategy_source: string;
+    market_data_csv: string;
+    market_data_metadata: {
+      provider: string;
+      instrument_id: string;
+      currency: string;
+      timezone: string;
+      calendar_id: string;
+      calendar_version: string;
+      availability_model: string;
+      adjustment_policy: string;
+      corporate_action_policy: string;
+      fetched_at: string;
+      warmup_start: string;
+      warmup_end: string;
+      evaluation_start: string;
+      evaluation_end: string;
+      download_parameters: Record<string, unknown>;
+    };
+    expected_sessions: Array<{
+      session_date: string;
+      open_at: string;
+      close_at: string;
+      early_close?: boolean;
+    }>;
+    initial_cash: number;
+    commission_rate: number;
+    slippage_fraction: number;
+  }) => request<{
+    supported: boolean;
+    can_run?: boolean;
+    worker_image_configured?: boolean;
+    reason?: string;
+    review_hash?: string;
+    preview_token?: string;
+    backend?: string;
+    mode?: string;
+    engine_version?: string;
+    compiler_version?: string;
+    worker_image?: string | null;
+    strategy_spec_hash?: string;
+    source_sha256?: string;
+    market_data_sha256?: string;
+    data_manifest_hash?: string;
+    summary?: Record<string, unknown>;
+    warnings?: string[];
+  }>("/runs/backtests/python-upload/preview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
+  createPythonUploadBacktest: (body: {
+    strategy_id: string;
+    instrument_id: string;
+    strategy_source: string;
+    initial_cash: number;
+    commission_rate: number;
+    slippage_fraction: number;
+    preview_token: string;
+  }) => request<{ run_id: string; status: string; execution_report: Record<string, unknown> }>("/runs/backtests/python-upload", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
   getRun: (id: string, params: RunDetailParams = {}) => {
     const q = new URLSearchParams();
     if (params.chart_payload) q.set("chart_payload", params.chart_payload);
@@ -536,6 +765,11 @@ export const api = {
     request<LLMSettings>("/settings/llm", {
       method: "PUT",
       body: JSON.stringify(settings),
+    }),
+  saveLLMModelProfile: (profile: ModelCapabilityProfile) =>
+    request<ModelCapabilityProfile>("/settings/llm/model-profile", {
+      method: "PUT",
+      body: JSON.stringify({ profile }),
     }),
   listLLMModels: (settings: ListLLMModelsRequest) =>
     request<LLMModelsResponse>("/settings/llm/models", {
@@ -810,6 +1044,18 @@ export interface LLMSettings {
   sse_timeout_seconds: number;
   env_path: string;
   providers: LLMProviderOption[];
+  model_profiles: ModelCapabilityProfile[];
+}
+
+export interface ModelCapabilityProfile {
+  provider: string;
+  base_url: string;
+  model_name: string;
+  context_window_tokens: number;
+  supports_tool_calling: boolean;
+  supports_reasoning: boolean;
+  reasoning_efforts: Array<"low" | "medium" | "high" | "max">;
+  input_modalities: Array<"text" | "image">;
 }
 
 export interface UpdateLLMSettingsRequest {

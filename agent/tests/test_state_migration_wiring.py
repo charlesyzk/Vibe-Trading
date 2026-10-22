@@ -105,9 +105,15 @@ def test_api_lifespan_preserves_startup_and_shutdown_order(
     async def stop_scheduler() -> None:
         events.append("scheduler-stop")
 
+    class PaperManager:
+        def shutdown_active_runtime(self) -> bool:
+            events.append("paper-runtime-stop")
+            return True
+
     monkeypatch.setattr(api_server, "_start_channel_runtime", start_channels)
     monkeypatch.setattr(api_server, "_stop_channel_runtime", stop_channels)
     monkeypatch.setattr(api_server, "_stop_scheduled_research_executor", stop_scheduler)
+    monkeypatch.setattr(api_server.app.state, "paper_execution_manager", PaperManager(), raising=False)
     monkeypatch.setattr(
         "src.config.accessor.get_env_config",
         lambda: type(
@@ -133,6 +139,7 @@ def test_api_lifespan_preserves_startup_and_shutdown_order(
         "scheduler-start",
         "channels-start",
         "serving",
+        "paper-runtime-stop",
         "channels-stop",
         "scheduler-stop",
     ]
@@ -157,9 +164,15 @@ def test_api_lifespan_stops_scheduler_when_channel_shutdown_fails(
     async def stop_scheduler() -> None:
         events.append("scheduler-stop")
 
+    class PaperManager:
+        def shutdown_active_runtime(self) -> bool:
+            events.append("paper-runtime-stop")
+            return True
+
     monkeypatch.setattr(api_server, "_run_startup_preflight", startup)
     monkeypatch.setattr(api_server, "_stop_channel_runtime", stop_channels)
     monkeypatch.setattr(api_server, "_stop_scheduled_research_executor", stop_scheduler)
+    monkeypatch.setattr(api_server.app.state, "paper_execution_manager", PaperManager(), raising=False)
 
     async def scenario() -> None:
         async with api_server._lifespan(api_server.app):
@@ -168,4 +181,105 @@ def test_api_lifespan_stops_scheduler_when_channel_shutdown_fails(
     with pytest.raises(RuntimeError, match="channel shutdown failed"):
         asyncio.run(scenario())
 
-    assert events == ["startup", "serving", "channels-stop", "scheduler-stop"]
+    assert events == ["startup", "serving", "paper-runtime-stop", "channels-stop", "scheduler-stop"]
+
+
+def test_api_lifespan_shuts_down_manager_owned_by_each_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    import api_server
+    from fastapi import FastAPI
+
+    stopped: list[str] = []
+
+    class PaperManager:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def shutdown_active_runtime(self) -> bool:
+            stopped.append(self.name)
+            return True
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(api_server, "_run_startup_preflight", no_op)
+    monkeypatch.setattr(api_server, "_stop_scheduled_research_on_shutdown", no_op)
+    first = FastAPI()
+    second = FastAPI()
+    first.state.paper_execution_manager = PaperManager("first")
+    second.state.paper_execution_manager = PaperManager("second")
+
+    async def scenario() -> None:
+        async with api_server._lifespan(first):
+            pass
+        assert stopped == ["first"]
+        async with api_server._lifespan(second):
+            pass
+
+    asyncio.run(scenario())
+    assert stopped == ["first", "second"]
+
+
+def test_api_lifespan_installs_explicit_paper_composition_without_starting_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    import api_server
+    from fastapi import FastAPI
+    from src.execution.paper_execution_composition import PaperExecutionComposition
+    from src.execution.paper_execution_manager import PaperExecutionManager, PaperRuntimeScope
+    from src.execution.paper_execution_readiness import PaperExecutionReadiness
+
+    factory_calls: list[str] = []
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(api_server, "_run_startup_preflight", no_op)
+    monkeypatch.setattr(api_server, "_stop_scheduled_research_on_shutdown", no_op)
+    runtime_factory = lambda *_args, **_kwargs: factory_calls.append("factory")
+    runtime_factory.strategy_version_id = "f" * 64
+    manager = PaperExecutionManager(runtime_factory=runtime_factory)
+    readiness = PaperExecutionReadiness()
+    scope = PaperRuntimeScope("IBKR", "DU1234567")
+    composition = PaperExecutionComposition(manager, readiness, scope)
+    target_app = FastAPI()
+    api_server.configure_paper_execution_app(composition, target_app=target_app)
+
+    async def scenario() -> None:
+        async with api_server._lifespan(target_app):
+            assert target_app.state.paper_execution_manager is manager
+            assert target_app.state.paper_execution_readiness is readiness
+            assert target_app.state.paper_execution_scope is scope
+            assert manager.status() is None
+            assert factory_calls == []
+
+    asyncio.run(scenario())
+    assert factory_calls == []
+
+
+def test_api_lifespan_default_paper_composition_remains_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    import api_server
+    from fastapi import FastAPI
+
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(api_server, "_run_startup_preflight", no_op)
+    monkeypatch.setattr(api_server, "_stop_scheduled_research_on_shutdown", no_op)
+    target_app = FastAPI()
+
+    async def scenario() -> None:
+        async with api_server._lifespan(target_app):
+            manager = target_app.state.paper_execution_manager
+            readiness = target_app.state.paper_execution_readiness
+            assert manager.runtime_factory is None
+            assert readiness.composition_ready is False
+            assert manager.status() is None
+
+    asyncio.run(scenario())

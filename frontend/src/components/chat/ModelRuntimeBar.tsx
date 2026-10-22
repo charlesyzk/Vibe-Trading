@@ -13,15 +13,22 @@ export function ModelRuntimeBar({
   settings,
   runtimeProvider,
   runtimeModel,
-  runtimeReasoningEffort,
 }: Props) {
   const { t } = useTranslation();
   if (!settings) return null;
 
-  const providerId = runtimeProvider || settings.provider;
+  // The bar is a view of the current configuration. Session metadata is
+  // historical and must not mask a model change made in Settings.
+  const providerId = settings.provider;
   const provider = settings.providers.find((item) => item.name === providerId);
   const providerLabel = provider?.label || providerId || t("agent.unknownProvider");
-  const model = runtimeModel || settings.model_name || t("agent.unknownModel");
+  const model = settings.model_name || t("agent.unknownModel");
+  const runtimeProviderOption = settings.providers.find((item) => item.name === runtimeProvider);
+  const runtimeProviderLabel = runtimeProviderOption?.label || runtimeProvider || t("agent.unknownProvider");
+  const sessionModelDiffers = Boolean(
+    (runtimeProvider && runtimeProvider !== settings.provider)
+    || (runtimeModel && runtimeModel !== settings.model_name),
+  );
   const effortLabels: Record<string, string> = {
     none: t("settings.reasoningEffortNone"),
     low: t("settings.reasoningEffortLow"),
@@ -29,9 +36,7 @@ export function ModelRuntimeBar({
     high: t("settings.reasoningEffortHigh"),
     max: t("settings.reasoningEffortMax"),
   };
-  const reasoningEffort = runtimeReasoningEffort !== undefined
-    ? runtimeReasoningEffort
-    : settings.reasoning_effort;
+  const reasoningEffort = settings.reasoning_effort;
   const effortLabel = effortLabels[reasoningEffort] || t("settings.providerDefault");
 
   return (
@@ -44,6 +49,17 @@ export function ModelRuntimeBar({
         <span className="shrink-0 font-medium text-foreground">{providerLabel}</span>
         <span className="text-muted-foreground/60">·</span>
         <span className="truncate font-mono text-[11px] text-muted-foreground" title={model}>{model}</span>
+        {sessionModelDiffers && (
+          <span
+            className="hidden truncate text-[10px] text-muted-foreground/70 xl:inline"
+            title={`${runtimeProviderLabel} · ${runtimeModel || t("agent.unknownModel")}`}
+          >
+            {t("agent.previousSessionModel", {
+              provider: runtimeProviderLabel,
+              model: runtimeModel || t("agent.unknownModel"),
+            })}
+          </span>
+        )}
         <span className="ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border/70 bg-muted/35 px-2 py-0.5 text-[10px] text-muted-foreground">
           <Cpu className="h-3 w-3" aria-hidden="true" />
           {t("agent.reasoningStrength")}: {effortLabel}

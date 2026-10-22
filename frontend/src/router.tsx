@@ -16,6 +16,9 @@ const Settings = lazy(() =>
 const Runtime = lazy(() =>
   import("@/pages/Runtime").then((m) => ({ default: m.Runtime })),
 );
+const Execution = lazy(() =>
+  import("@/pages/Execution").then((m) => ({ default: m.Execution })),
+);
 const Scheduled = lazy(() =>
   import("@/pages/Scheduled").then((m) => ({ default: m.Scheduled })),
 );
@@ -59,6 +62,7 @@ export const router = createBrowserRouter([
       { path: "/about", element: wrap(Home) },
       { path: "/agent", element: wrap(Agent) },
       { path: "/runtime", element: wrap(Runtime) },
+      { path: "/execution", element: wrap(Execution) },
       { path: "/scheduled", element: wrap(Scheduled) },
       { path: "/reports", element: wrap(Reports) },
       { path: "/portfolio", element: wrap(Portfolio) },

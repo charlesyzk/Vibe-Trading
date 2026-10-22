@@ -6,9 +6,13 @@ ChatLLM is designed specifically for the AgentLoop ReAct cycle.
 from __future__ import annotations
 
 import asyncio
+import base64
 import html
 import inspect
+import io
+import json
 import logging
+import mimetypes
 import os
 import re
 import time as _time
@@ -17,7 +21,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 from src.config.accessor import get_env_config
 from src.providers.content_filter import is_content_filter_triggered
+from src.providers.capabilities import get_llm_credentials
 from src.providers.llm import build_llm
+from src.providers.model_profiles import ModelCapabilityProfile, get_model_profile
+from src.tools.path_utils import allowed_file_roots, resolve_safe_path
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +358,128 @@ class ChatLLM:
             configured_model=configured_model,
             reasoning_effort=runtime_cfg.langchain_reasoning_effort.strip().lower(),
         )
+        credentials = get_llm_credentials(self.runtime_snapshot.provider, configured_model)
+        self.model_profile: ModelCapabilityProfile | None = get_model_profile(
+            self.runtime_snapshot.provider,
+            credentials.get("base_url") or "",
+            configured_model,
+        ) if credentials.get("base_url") else None
+
+    def _request_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Attach current-turn images only when this exact model profile allows it."""
+        result = [dict(message) for message in messages]
+        current_index = next(
+            (index for index in range(len(result) - 1, -1, -1) if result[index].get("role") == "user"),
+            None,
+        )
+        if current_index is None:
+            return result
+        content = result[current_index].get("content")
+        if not isinstance(content, str) or "[Uploaded files: " not in content:
+            return result
+        start = content.find("[Uploaded files: ")
+        close = content.find("]\n\n", start)
+        if close < 0:
+            raise ValueError("Uploaded image metadata is malformed; please attach the image again.")
+        try:
+            attachments = json.loads(content[start + len("[Uploaded files: "):close])
+        except json.JSONDecodeError as exc:
+            raise ValueError("Uploaded image metadata is malformed; please attach the image again.") from exc
+        if not isinstance(attachments, list):
+            raise ValueError("Uploaded image metadata is malformed; please attach the image again.")
+        image_items = []
+        other_items = []
+        for item in attachments:
+            mime = (
+                mimetypes.guess_type(str(item.get("filename") or item.get("path") or ""))[0]
+                if isinstance(item, dict) else None
+            )
+            if isinstance(item, dict) and isinstance(item.get("path"), str) and mime and mime.startswith("image/"):
+                image_items.append(item)
+            else:
+                other_items.append(item)
+        if not image_items:
+            return result
+        profile = self.model_profile
+        if profile is None:
+            raise ValueError(
+                "This model has no explicit capability profile. Configure its context window, "
+                "tool calling, reasoning, and image input in Settings before attaching images."
+            )
+        remaining_envelope = (
+            f"[Uploaded files: {json.dumps(other_items, ensure_ascii=False)}]\n\n"
+            if other_items else ""
+        )
+        prompt = content[:start] + remaining_envelope + content[close + len("]\n\n"):]
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        total_bytes = 0
+        total_payload_bytes = 0
+        for item in image_items:
+            try:
+                path = resolve_safe_path(item["path"], None, allowed_file_roots(), purpose="file")
+            except ValueError as exc:
+                raise ValueError(f"Could not attach image: {exc}") from exc
+            if not path.is_file():
+                raise ValueError(f"Attached image is missing: {item.get('filename', path.name)}")
+            mime = mimetypes.guess_type(path.name)[0]
+            if mime not in {"image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/tiff"}:
+                raise ValueError(f"Unsupported image format: {path.suffix or path.name}")
+            size = path.stat().st_size
+            total_bytes += size
+            if size > 10 * 1024 * 1024 or total_bytes > 20 * 1024 * 1024:
+                raise ValueError("Images must be under 10 MB each and 20 MB total per message.")
+            if "image" in profile.input_modalities:
+                if mime in {"image/bmp", "image/tiff"}:
+                    from PIL import Image
+
+                    with Image.open(path) as image:
+                        converted = io.BytesIO()
+                        image.convert("RGB").save(converted, format="PNG")
+                        image_data = converted.getvalue()
+                    mime = "image/png"
+                else:
+                    image_data = path.read_bytes()
+                if len(image_data) > 10 * 1024 * 1024:
+                    raise ValueError("The converted image exceeds the 10 MB image limit.")
+                total_payload_bytes += len(image_data)
+                if total_payload_bytes > 20 * 1024 * 1024:
+                    raise ValueError("The combined image payload exceeds the 20 MB limit.")
+                data_url = f"data:{mime};base64,{base64.b64encode(image_data).decode('ascii')}"
+                blocks.append({"type": "image_url", "image_url": {"url": data_url}})
+            else:
+                blocks.append({
+                    "type": "text",
+                    "text": self._local_image_ocr(path, str(item.get("filename") or path.name)),
+                })
+        result[current_index]["content"] = blocks
+        return result
+
+    @staticmethod
+    def _local_image_ocr(path: Any, filename: str) -> str:
+        """Use an explicitly local OCR engine when the profile disables vision."""
+        from src.tools.ocr import get_ocr_engine
+
+        engine = get_ocr_engine()
+        if engine is None or engine.is_cloud:
+            raise ValueError(
+                "This model profile disables image input, and no local OCR engine is available. "
+                "Install/configure a local OCR engine or enable image input for a vision-capable model."
+            )
+        try:
+            import numpy as np
+            from PIL import Image
+
+            with Image.open(path) as image:
+                text = engine.recognize(np.array(image.convert("RGB")))
+        except Exception as exc:
+            raise ValueError(f"Local OCR failed for {filename}: {type(exc).__name__}: {exc}") from exc
+        text = (text or "").strip()
+        if len(text) > 50_000:
+            text = text[:50_000] + "\n[OCR text truncated at 50,000 characters]"
+        return (
+            f"\n[Local OCR transcription of {filename}; image pixels are not available to this model. "
+            f"OCR text does not describe chart layout or visual trends.]\n{text}"
+        )
 
     def close(self) -> None:
         """Best-effort release of HTTP clients owned by this adapter.
@@ -466,11 +595,27 @@ class ChatLLM:
         Returns:
             LLMResponse.
         """
+        if self.model_profile and not self.model_profile.supports_tool_calling:
+            tools = None
+        self._validate_image_blocks(messages)
         llm = self._llm.bind_tools(tools) if tools else self._llm
         config = {"timeout": timeout} if timeout else {}
+        messages = self._request_messages(messages)
         messages, call_kwargs = self._prompt_cache_request(messages)
         ai_message = llm.invoke(messages, config=config, **call_kwargs)
         return self._parse_response(ai_message)
+
+    def _validate_image_blocks(self, messages: List[Dict[str, Any]]) -> None:
+        """Reject image blocks unless the exact configured profile enables them."""
+        has_image = any(
+            isinstance(message.get("content"), list)
+            and any(isinstance(block, dict) and block.get("type") in {"image_url", "input_image"} for block in message["content"])
+            for message in messages
+        )
+        if not has_image:
+            return
+        if self.model_profile is None or "image" not in self.model_profile.input_modalities:
+            raise ValueError("Image input requires an explicit image-enabled profile for the selected model.")
 
     def stream_chat(
         self,
@@ -504,7 +649,11 @@ class ChatLLM:
         Returns:
             Parsed ``LLMResponse``.
         """
+        self._validate_image_blocks(messages)
+        messages = self._request_messages(messages)
         try:
+            if self.model_profile and not self.model_profile.supports_tool_calling:
+                tools = None
             llm = self._llm.bind_tools(tools) if tools else self._llm
             config = {"timeout": timeout} if timeout else {}
             messages, call_kwargs = self._prompt_cache_request(messages)

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "vibe-trading-ai"
 version = "0.1.16"
@@ -26,7 +30,7 @@ dependencies = [
     "langgraph>=1.2.5,<1.3",
     "langgraph-checkpoint>=2.1.0,<5",
     "python-dotenv>=1.0.0",
-    "httpx>=0.28.0",
+    "httpx[socks]>=0.28.0",
     "h2>=4.4.1",
     "defusedxml>=0.7.1",
     "oauth-cli-kit>=0.1.3",
@@ -123,6 +127,10 @@ include = ["src*", "backtest*", "cli*", "evals*"]
 "src.factors" = ["zoo/**/*.yaml", "zoo/**/*.md", "zoo/**/NOTICE"]
 
 [project.optional-dependencies]
+backtrader-runtime = [
+    "backtrader==1.9.78.123",
+    "exchange-calendars==4.13.2",
+]
 ibkr = [
     "ib_async>=2.0",
 ]

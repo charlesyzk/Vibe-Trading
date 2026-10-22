@@ -1399,6 +1399,9 @@ class AgentLoop:
                     if is_last_iteration or correction_text_only
                     else self.registry.get_definitions()
                 )
+                model_profile = getattr(self.llm, "model_profile", None)
+                if model_profile is not None and not model_profile.supports_tool_calling:
+                    tool_defs = None
                 if is_last_iteration:
                     trace.write({"type": "forced_text_only", "iter": current_iter})
                 elif correction_text_only:
@@ -3082,6 +3085,11 @@ class AgentLoop:
             str(model or ""),
             env_window=cfg.agent_tuning.vibe_trading_context_window,
             learned_window=self._learned_context_window,
+            profile_window=(
+                self.llm.model_profile.context_window_tokens
+                if getattr(self.llm, "model_profile", None) is not None
+                else None
+            ),
         )
         return CompactionBudget(
             window=window,

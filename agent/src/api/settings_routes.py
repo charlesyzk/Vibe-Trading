@@ -18,6 +18,13 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
 from src.config.accessor import get_env_value, reset_env_config
+from src.providers.model_profiles import (
+    ModelCapabilityProfile,
+    list_model_profiles,
+    model_profile_matches,
+    profile_from_payload,
+    upsert_model_profile,
+)
 
 # Agent root (agent/) — resolved from this file's location (agent/src/api/).
 _AGENT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -60,6 +67,13 @@ class LLMSettingsResponse(BaseModel):
     sse_timeout_seconds: int
     env_path: str
     providers: List[LLMProviderOption]
+    model_profiles: List[ModelCapabilityProfile] = Field(default_factory=list)
+
+
+class SaveModelProfileRequest(BaseModel):
+    """A complete, explicit capability profile for an exact model endpoint."""
+
+    profile: Dict[str, Any]
 
 
 class UpdateLLMSettingsRequest(BaseModel):
@@ -225,10 +239,13 @@ def _baostock_installed() -> bool:
 
 
 def _read_settings_env_values() -> Dict[str, str]:
-    """Read settings without creating a dotenv file.
+    """Read effective settings without creating a dotenv file.
 
     Prefer the canonical user config, then the legacy package-local config.
     If neither exists, use ``agent/.env.example`` for display defaults only.
+    Runtime environment variables override dotenv values, matching the
+    precedence used by the agent when it starts (and by desktop launchers that
+    supply model configuration directly).
     """
     host = _host()
     env_path = host.ENV_PATH
@@ -243,6 +260,24 @@ def _read_settings_env_values() -> Dict[str, str]:
         values = read_env(env_example_path)
     else:
         values = {}
+
+    # The model process reads os.environ before dotenv values. Keep the UI in
+    # sync with that effective runtime configuration, especially when a
+    # launcher supplies LANGCHAIN_MODEL_NAME without writing it to a dotenv.
+    runtime_setting_names = {
+        "LANGCHAIN_PROVIDER",
+        "LANGCHAIN_MODEL_NAME",
+        "LANGCHAIN_TEMPERATURE",
+        "LANGCHAIN_REASONING_EFFORT",
+        "TIMEOUT_SECONDS",
+        "MAX_RETRIES",
+    }
+    runtime_setting_names.update(
+        provider.base_url_env for provider in LLM_PROVIDERS if provider.base_url_env
+    )
+    for name in runtime_setting_names:
+        if name in os.environ:
+            values[name] = os.environ[name]
 
     if _desktop_secure_credentials_enabled():
         for name in _desktop_secure_credential_names():
@@ -335,7 +370,7 @@ async def _list_provider_models(
             response = await client.get(_model_list_url(base_url), headers=headers)
             response.raise_for_status()
             models = _extract_model_ids(response.json())
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, ImportError, ValueError):
         return LLMModelsResponse(
             provider=provider.name,
             models=fallback,
@@ -366,7 +401,10 @@ def _build_llm_settings_response(
     env_values = values if values is not None else _read_settings_env_values()
     provider_name = env_values.get("LANGCHAIN_PROVIDER", "openai").strip().lower()
     provider = LLM_PROVIDER_BY_NAME.get(provider_name, LLM_PROVIDER_BY_NAME["openai"])
-    api_key = env_values.get(provider.api_key_env or "", "") if provider.api_key_env else ""
+    api_key = (
+        os.environ.get(provider.api_key_env, "")
+        or env_values.get(provider.api_key_env, "")
+    ) if provider.api_key_env else ""
     api_key_configured = host._is_configured_secret(api_key, LLM_API_KEY_PLACEHOLDERS)
     api_key_hint = None
     if provider.auth_type == "oauth":
@@ -402,6 +440,7 @@ def _build_llm_settings_response(
         sse_timeout_seconds=host._coerce_int(env_values.get("VIBE_TRADING_SSE_TIMEOUT", "90"), 90),
         env_path=host._project_relative_path(host.ENV_PATH),
         providers=LLM_PROVIDERS,
+        model_profiles=list_model_profiles(),
     )
 
 
@@ -663,6 +702,27 @@ def register_settings_routes(
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
                 ) from exc
+        try:
+            base_url = _validate_model_base_url(base_url)
+            model_profile = next((
+                item for item in list_model_profiles()
+                if model_profile_matches(
+                    item,
+                    provider=provider.name,
+                    base_url=base_url,
+                    model_name=model_name,
+                )
+            ), None)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        if model_profile and reasoning_effort not in {"", "none"}:
+            if not model_profile.supports_reasoning or reasoning_effort not in model_profile.reasoning_efforts:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="The selected reasoning effort is not enabled in this model's capability profile.",
+                )
         updates: Dict[str, str] = {
             "LANGCHAIN_PROVIDER": provider.name,
             "LANGCHAIN_MODEL_NAME": model_name,
@@ -675,6 +735,14 @@ def register_settings_routes(
             updates["LANGCHAIN_REASONING_EFFORT"] = reasoning_effort
 
         if provider.api_key_env:
+            previous_custom_base = (
+                current_values.get("CUSTOM_BASE_URL") or provider.default_base_url
+            ).strip().rstrip("/")
+            custom_endpoint_changed = (
+                provider.name == "custom"
+                and bool(previous_custom_base)
+                and previous_custom_base != base_url.rstrip("/")
+            )
             if payload.clear_api_key:
                 updates[provider.api_key_env] = ""
             elif payload.api_key is not None and payload.api_key.strip():
@@ -684,17 +752,56 @@ def register_settings_routes(
                     if host_ref._is_configured_secret(api_key, LLM_API_KEY_PLACEHOLDERS)
                     else ""
                 )
+            elif custom_endpoint_changed:
+                # Custom credentials belong to their exact endpoint. Never
+                # carry an old relay's key to a newly entered URL.
+                updates[provider.api_key_env] = ""
             elif provider.api_key_env in current_values and host_ref._is_configured_secret(
                 current_values[provider.api_key_env],
                 LLM_API_KEY_PLACEHOLDERS,
             ):
                 updates[provider.api_key_env] = current_values[provider.api_key_env]
+            elif provider_name == current_values.get("LANGCHAIN_PROVIDER", "").strip().lower():
+                # A launcher may inject the key without writing it to dotenv.
+                # Preserve that exact provider credential across a settings save.
+                runtime_key = os.environ.get(provider.api_key_env, "")
+                if host_ref._is_configured_secret(runtime_key, LLM_API_KEY_PLACEHOLDERS):
+                    if not _desktop_secure_credentials_enabled():
+                        updates[provider.api_key_env] = runtime_key
+            elif (
+                provider_name == "custom"
+                and current_values.get("LANGCHAIN_PROVIDER", "").strip().lower() == "openai"
+                and base_url.rstrip("/") == "https://model.obei.com.cn/v1"
+                and current_values.get("OPENAI_BASE_URL", "").rstrip("/") == base_url.rstrip("/")
+            ):
+                # Move the old Obei-as-OpenAI key only for the same endpoint.
+                legacy_key = os.environ.get("OPENAI_API_KEY", "") or current_values.get("OPENAI_API_KEY", "")
+                if host_ref._is_configured_secret(legacy_key, LLM_API_KEY_PLACEHOLDERS):
+                    if not _desktop_secure_credentials_enabled():
+                        updates[provider.api_key_env] = legacy_key
         elif payload.clear_api_key:
             os.environ.pop("OPENAI_API_KEY", None)
 
-        saved_values = _persist_settings_updates(updates)
+        _persist_settings_updates(updates)
         _sync_runtime_env(provider, updates)
-        return _build_llm_settings_response(saved_values)
+        return _build_llm_settings_response()
+
+    @app.put(
+        "/settings/llm/model-profile",
+        response_model=ModelCapabilityProfile,
+        dependencies=[Depends(require_settings_write_auth)],
+    )
+    async def save_llm_model_profile(payload: SaveModelProfileRequest):
+        """Save a complete profile; capability values are never inferred."""
+        try:
+            profile = profile_from_payload(payload.profile)
+            upsert_model_profile(profile)
+            return profile
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid model capability profile: {exc}",
+            ) from exc
 
     @app.post(
         "/settings/llm/models",
@@ -723,17 +830,28 @@ def register_settings_routes(
             ) from exc
         api_key = (payload.api_key or "").strip()
         if not api_key and provider.api_key_env:
-            trusted_base_urls = {
-                _validate_model_base_url(candidate)
-                for candidate in (
+            if provider.name == "custom":
+                trusted_candidates = (
+                    (saved_base_url,)
+                    if current_values.get("LANGCHAIN_PROVIDER", "").strip().lower() == "custom"
+                    else ()
+                )
+            else:
+                trusted_candidates = (
                     saved_base_url,
                     provider.default_base_url,
                     *provider.base_url_options,
                 )
+            trusted_base_urls = {
+                _validate_model_base_url(candidate)
+                for candidate in trusted_candidates
                 if candidate.strip()
             }
-            if not requested_base_url or base_url in trusted_base_urls:
-                saved_key = current_values.get(provider.api_key_env, "").strip()
+            if base_url in trusted_base_urls or (provider.name != "custom" and not requested_base_url):
+                saved_key = (
+                    os.environ.get(provider.api_key_env, "")
+                    or current_values.get(provider.api_key_env, "")
+                ).strip()
                 if _host()._is_configured_secret(saved_key, LLM_API_KEY_PLACEHOLDERS):
                     api_key = saved_key
         return await _list_provider_models(

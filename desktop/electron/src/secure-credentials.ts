@@ -12,6 +12,7 @@ type CredentialFile = {
 const ENV_CREDENTIALS = new Set([
   "OPENROUTER_API_KEY",
   "OPENAI_API_KEY",
+  "CUSTOM_API_KEY",
   "ANTHROPIC_API_KEY",
   "DEEPSEEK_API_KEY",
   "SILICONFLOW_API_KEY",
@@ -86,7 +87,9 @@ export class SecureCredentialStore {
       throw new Error(this.messages.credentialEncryptionUnavailable);
     }
     await this.load();
-    await this.migrateDotenv(path.join(this.homeDirectory, ".vibe-trading", ".env"));
+    const dotenvPath = path.join(this.homeDirectory, ".vibe-trading", ".env");
+    await this.migrateDotenv(dotenvPath);
+    await this.migrateObeiCredential(dotenvPath);
     await this.migrateJsonField(
       path.join(this.homeDirectory, ".vibe-trading", "qveris.json"),
       "api_key",
@@ -193,6 +196,30 @@ export class SecureCredentialStore {
       await this.persist();
       await atomicTextWrite(filePath, nextLines.join("\n"));
     }
+  }
+
+  private async migrateObeiCredential(filePath: string): Promise<void> {
+    if (this.values.CUSTOM_API_KEY || !this.values.OPENAI_API_KEY) return;
+    let text: string;
+    try {
+      text = await fs.readFile(filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const entries = Object.fromEntries(
+      text.split(/\r?\n/u).flatMap((line): [string, string][] => {
+        const match = line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*)\s*$/u);
+        return match ? [[match[1], unquote(match[2])]] : [];
+      }),
+    );
+    if (
+      entries.LANGCHAIN_PROVIDER?.toLowerCase() !== "openai"
+      || entries.OPENAI_BASE_URL?.replace(/\/+$/u, "") !== "https://model.obei.com.cn/v1"
+    ) return;
+    this.values.CUSTOM_API_KEY = this.values.OPENAI_API_KEY;
+    this.migrated.push("CUSTOM_API_KEY");
+    await this.persist();
   }
 
   private async migrateJsonField(

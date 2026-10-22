@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101a23">
+  <title>Vibe-Trading 项目导览</title>
+  <style>
+    :root{color-scheme:dark;--bg:#101a23;--panel:#172630;--panel2:#1c3039;--ink:#e8f0e9;--muted:#9aafb0;--line:#31474c;--mint:#a4e7c3;--cyan:#73d7df;--amber:#f1bd70;--red:#f08172;--mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;--sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:30px}body{margin:0;background-color:var(--bg);background-image:linear-gradient(#ffffff06 1px,transparent 1px),linear-gradient(90deg,#ffffff06 1px,transparent 1px);background-size:38px 38px;color:var(--ink);font:16px/1.65 var(--sans)}a{color:var(--cyan);text-decoration-thickness:1px;text-underline-offset:3px}a:hover{color:var(--mint)}button{font:inherit}.wrap{width:min(1120px,calc(100% - 40px));margin:auto}.topline{height:48px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;color:var(--muted);font:11px var(--mono);letter-spacing:.12em;text-transform:uppercase}.mark{color:var(--mint)}
+    header{padding:76px 0 42px}.eyebrow{display:flex;align-items:center;gap:10px;color:var(--mint);font:12px var(--mono);letter-spacing:.15em;text-transform:uppercase}.pulse{width:8px;height:8px;border-radius:50%;background:var(--mint);box-shadow:0 0 0 5px #a4e7c31c}.hero{display:grid;grid-template-columns:1.08fr .92fr;gap:56px;align-items:center}.hero h1{font-size:clamp(42px,6.7vw,78px);line-height:1.01;letter-spacing:-.055em;margin:22px 0 22px;max-width:720px}.hero h1 span{color:var(--mint)}.lead{font-size:18px;color:#c2d1cd;max-width:650px;margin:0}.hero-note{margin-top:28px;padding:13px 16px;border-left:2px solid var(--amber);background:#f1bd7010;color:#c6c7b5;font-size:13px;max-width:600px}.diagram{position:relative;background:linear-gradient(145deg,#18323a,#14232c);border:1px solid #466267;border-radius:4px;padding:24px;box-shadow:12px 12px 0 #0a1117}.diagram-head{font:11px var(--mono);letter-spacing:.12em;color:var(--muted);display:flex;justify-content:space-between}.diagram-head b{color:var(--mint);font-weight:500}.flow{display:grid;grid-template-columns:1fr 30px 1fr;gap:10px;align-items:center;margin:23px 0}.node{border:1px solid #426066;background:#13242c;padding:12px 13px;min-height:68px}.node strong{display:block;font-size:13px;font-weight:600}.node small{display:block;color:var(--muted);font-size:11px;margin-top:4px}.arrow{color:var(--amber);font:18px var(--mono);text-align:center}.diagram-foot{border-top:1px solid var(--line);padding-top:13px;display:flex;justify-content:space-between;color:var(--muted);font:10px var(--mono);letter-spacing:.04em}.diagram-foot span:last-child{color:var(--amber)}
+    nav{border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin:4px 0 72px;display:flex;gap:24px;overflow:auto;padding:13px 0;white-space:nowrap;font:11px var(--mono);letter-spacing:.05em}nav a{color:var(--muted);text-decoration:none}nav a:hover{color:var(--mint)}section{padding:0 0 76px}.section-head{display:grid;grid-template-columns:90px 1fr;gap:18px;align-items:start;margin-bottom:26px}.index{color:var(--amber);font:12px var(--mono);padding-top:9px}.section-head h2{font-size:clamp(27px,4vw,40px);letter-spacing:-.035em;line-height:1.15;margin:0 0 8px}.section-head p{margin:0;color:var(--muted);max-width:740px}.grid{display:grid;gap:14px}.grid.three{grid-template-columns:repeat(3,1fr)}.grid.two{grid-template-columns:repeat(2,1fr)}.card{background:var(--panel);border:1px solid var(--line);padding:21px 22px;position:relative}.card h3{font-size:17px;margin:0 0 8px}.card p{margin:0;color:#b5c5c2;font-size:14px}.tag{font:10px var(--mono);letter-spacing:.08em;color:var(--cyan);text-transform:uppercase;margin-bottom:12px}.number{position:absolute;right:18px;top:16px;color:#6d8587;font:11px var(--mono)}
+    .pipeline{display:grid;grid-template-columns:repeat(5,1fr);gap:0;border:1px solid var(--line);background:var(--panel)}.stage{padding:20px 16px;border-right:1px solid var(--line);position:relative}.stage:last-child{border:0}.stage:not(:last-child):after{content:"›";position:absolute;right:-8px;top:26px;background:var(--panel);color:var(--amber);z-index:1;font:18px var(--mono);padding:0 2px}.stage b{display:block;color:var(--mint);font:12px var(--mono);margin-bottom:7px}.stage strong{font-size:14px}.stage p{font-size:12px;line-height:1.55;color:var(--muted);margin:6px 0 0}
+    .term-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}.term{background:#14232b;border:1px solid var(--line)}.term summary{cursor:pointer;list-style:none;padding:13px 16px;color:var(--ink);font-weight:600;display:flex;justify-content:space-between;gap:16px}.term summary::-webkit-details-marker{display:none}.term summary:after{content:"+";color:var(--amber);font:17px var(--mono)}.term[open] summary:after{content:"−"}.term summary em{font-style:normal;color:var(--cyan);font:11px var(--mono);font-weight:400}.term p{margin:0;padding:0 16px 15px;color:#b5c5c2;font-size:13px}.term p code{color:var(--mint);font:12px var(--mono)}
+    .callout{border:1px solid #7e683e;background:#f1bd700d;padding:21px 23px;display:grid;grid-template-columns:120px 1fr;gap:20px}.callout strong{color:var(--amber);font:12px var(--mono);letter-spacing:.08em}.callout p{margin:0;color:#c8cbc0;font-size:14px}.callout p+p{margin-top:10px}.codebox{background:#0b141b;border:1px solid #31474c;padding:19px 21px;overflow:auto;color:#cce5d7;font:13px/1.8 var(--mono)}.codebox .comment{color:#849c9b}.setup-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.setup-grid .card{padding:20px}.setup-grid h3{margin-bottom:12px}.foot{border-top:1px solid var(--line);padding:24px 0 48px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;gap:20px}.foot strong{color:var(--mint);font-weight:500}.mini{font:10px var(--mono);color:var(--muted)}
+    @media(max-width:760px){.hero{grid-template-columns:1fr;gap:30px}.hero{padding-bottom:8px}header{padding-top:48px}.diagram{max-width:520px}.grid.three{grid-template-columns:1fr}.grid.two,.term-grid,.setup-grid{grid-template-columns:1fr}.pipeline{grid-template-columns:1fr}.stage{border-right:0;border-bottom:1px solid var(--line)}.stage:not(:last-child):after{content:"⌄";right:18px;top:auto;bottom:-12px}.section-head{grid-template-columns:50px 1fr}.callout{grid-template-columns:1fr;gap:8px}.foot{display:block}.foot span{display:block;margin-top:8px}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topline"><span class="mark">VT / FIELD GUIDE</span><span>Repository orientation · 0.1.16</span></div>
+    <header>
+      <div class="hero">
+        <div>
+          <div class="eyebrow"><i class="pulse"></i> 给开发者的量化项目导览</div>
+          <h1>把一个交易想法，<br><span>变成可复核的研究。</span></h1>
+          <p class="lead">Vibe-Trading 是一个开源金融研究工作台：你用自然语言提出问题，它连接行情、分析工具和回测引擎，产出报告与运行记录。它更像“研究助理 + 实验平台”，不是自动赚钱的策略。</p>
+          <div class="hero-note">一句话理解：模型负责理解问题、编排工具和解释结果；行情与计算引擎提供证据。结果是否可信，仍取决于数据、假设、交易成本和验证方式。</div>
+        </div>
+        <div class="diagram" aria-label="项目数据流示意图">
+          <div class="diagram-head"><span>RESEARCH PIPELINE</span><b>可检查的数据流</b></div>
+          <div class="flow">
+            <div class="node"><strong>研究问题</strong><small>自然语言 / 文件 / 标的</small></div><div class="arrow">→</div><div class="node"><strong>Agent 编排</strong><small>选择工具与研究步骤</small></div>
+            <div class="node"><strong>数据与策略</strong><small>行情 / 因子 / 规则</small></div><div class="arrow">→</div><div class="node"><strong>回测与风险</strong><small>历史模拟，不是真实成交</small></div>
+            <div class="node"><strong>可复核产物</strong><small>指标 / 报告 / run card</small></div><div class="arrow">→</div><div class="node"><strong>人来判断</strong><small>检查证据与局限</small></div>
+          </div>
+          <div class="diagram-foot"><span>INPUT → COMPUTE → ARTIFACT</span><span>HUMAN REVIEW REQUIRED</span></div>
+        </div>
+      </div>
+    </header>
+    <nav aria-label="页面目录"><a href="#map">项目地图</a><a href="#workflow">研究流程</a><a href="#vocab">量化词汇</a><a href="#limits">怎样读结果</a><a href="#run">本机启动</a></nav>
+
+    <section id="map">
+      <div class="section-head"><span class="index">MAP / 01</span><div><h2>它由哪些部分组成</h2><p>仓库同时包含研究引擎、Agent 运行时和用户界面。你可以把它当作一个“带金融工具箱的 AI 应用”。</p></div></div>
+      <div class="grid three">
+        <article class="card"><span class="number">01</span><div class="tag">Research core</div><h3>市场数据与量化计算</h3><p>加载多个市场的行情与基本面数据，计算技术指标、因子、期权估值等，并由不同市场的回测引擎模拟策略规则。</p></article>
+        <article class="card"><span class="number">02</span><div class="tag">Agent runtime</div><h3>把问题拆成工具调用</h3><p>Python Agent 使用 LLM 理解任务，调用行情、研究、回测、文档读取、报告等工具。记忆、会话和运行产物会保存在本地。</p></article>
+        <article class="card"><span class="number">03</span><div class="tag">Ways in</div><h3>CLI、Web、MCP 与 API</h3><p>CLI 适合交互与脚本；FastAPI 提供本地服务；React 提供 Web UI；MCP 让其他兼容 Agent 调用金融工具。</p></article>
+      </div>
+    </section>
+
+    <section id="workflow">
+      <div class="section-head"><span class="index">FLOW / 02</span><div><h2>典型研究任务怎么走</h2><p>一个“测试 BTC 均线策略”的请求背后，大致经过这些阶段。每一步的产物都应该能被检查。</p></div></div>
+      <div class="pipeline">
+        <div class="stage"><b>01 / ASK</b><strong>说清问题</strong><p>标的、日期范围、策略规则和你想看的指标。</p></div>
+        <div class="stage"><b>02 / FETCH</b><strong>取市场数据</strong><p>从可用数据源取价格序列；来源与数据质量会影响结论。</p></div>
+        <div class="stage"><b>03 / SIMULATE</b><strong>历史回测</strong><p>按历史数据模拟策略何时持仓、何时空仓，并计算结果。</p></div>
+        <div class="stage"><b>04 / AUDIT</b><strong>核对假设</strong><p>检查样本、基准、成本、仓位、前视偏差和验证区间。</p></div>
+        <div class="stage"><b>05 / REVIEW</b><strong>读报告做判断</strong><p>运行卡记录配置和产物，帮助复查这次运行如何产生。</p></div>
+      </div>
+    </section>
+
+    <section id="vocab">
+      <div class="section-head"><span class="index">WORDS / 03</span><div><h2>量化术语，先掌握这些</h2><p>点击词条展开。把术语理解为描述“如何做实验、如何衡量结果”的语言即可。</p></div></div>
+      <div class="term-grid">
+        <details class="term"><summary>量化策略 <em>strategy</em></summary><p>把交易决策写成规则：例如“短期均线上穿长期均线时持有，否则空仓”。规则越具体，越容易用代码重现和检验。</p></details>
+        <details class="term"><summary>回测 <em>backtest</em></summary><p>拿过去的行情，按策略规则模拟“当时如果这么做会怎样”。它是历史模拟，不等于真实账户成交；若数据或规则利用了当时尚不知道的信息，结果会虚高。</p></details>
+        <details class="term"><summary>因子 / Alpha <em>factor / alpha</em></summary><p>因子是把股票某种特征变成数字的办法，例如近期涨幅、估值或波动。Alpha 常指希望能预测相对表现的信号；名字里有 Alpha 不代表它真的能预测或盈利。</p></details>
+        <details class="term"><summary>标的与 Universe <em>asset / universe</em></summary><p>标的是单个可交易对象，例如 AAPL 或 BTC-USDT。Universe 是研究允许选择的对象集合，例如沪深 300 成分股。先定集合可减少事后挑赢家。</p></details>
+        <details class="term"><summary>收益率 <em>return</em></summary><p>资产价格相对起点变化的比例。价格从 100 到 105，简单收益率是 5%。不同频率（日、周、月）下的收益不可随意混在一起比较。</p></details>
+        <details class="term"><summary>基准 <em>benchmark</em></summary><p>用来比较策略的参照方案，例如同期一直持有该资产（买入持有）。策略赚了钱，不代表它比简单基准做得好。</p></details>
+        <details class="term"><summary>最大回撤 <em>max drawdown</em></summary><p>净值曲线从某个历史高点跌到之后低点的最大幅度。它描述“最难熬的一段跌了多少”，与最终收益不同，也不表示未来最大跌幅有上限。</p></details>
+        <details class="term"><summary>Sharpe（夏普比率） <em>risk-adjusted return</em></summary><p>大致表示每承担一单位波动，获得多少超额收益。数字越高不一定越安全：对分布、样本长度、无风险利率和计算频率的假设都很敏感。</p></details>
+        <details class="term"><summary>样本内 / 样本外 <em>in-sample / out-of-sample</em></summary><p>用来设计或调参数的数据叫样本内；事先留出、不用于调参的数据叫样本外。反复根据留出段改策略，它就不再是干净的样本外检验。</p></details>
+        <details class="term"><summary>过拟合 <em>overfitting</em></summary><p>规则把过去的偶然噪声也学进去，因此历史表现漂亮、换一段时间就失效。参数越多、试过的方案越多，越需要独立验证与多重比较校正。</p></details>
+        <details class="term"><summary>滑点与交易成本 <em>slippage / costs</em></summary><p>真实成交价可能比看到的报价差；手续费、税费、借券费也会减少收益。没有充分建模这些成本的回测，通常会比可执行结果乐观。</p></details>
+        <details class="term"><summary>模拟盘与实盘 <em>paper / live</em></summary><p>模拟盘用虚拟资金或券商沙盒；实盘会发送真实委托、承担真实盈亏。项目的券商连接器能力各不相同，需要逐个确认权限、市场规则和风险限额。</p></details>
+      </div>
+    </section>
+
+    <section id="limits">
+      <div class="section-head"><span class="index">READ / 04</span><div><h2>哪些结论不能混为一谈</h2><p>项目能帮你跑实验、组织证据；不能替代对实验设计的判断。</p></div></div>
+      <div class="callout"><strong>读数守则</strong><div>
+        <p><b>历史赚钱 ≠ 未来赚钱。</b> 回测结果受行情样本、数据源、复权方式、交易成本、成交假设和策略参数影响。</p>
+        <p><b>方向命中率高 ≠ 策略有效。</b> 还要看盈亏幅度、仓位、回撤、交易次数、基准表现与统计不确定性。</p>
+        <p><b>工具有交易接口 ≠ 适合直接实盘。</b> 市场规则、券商权限、下单限额、异常处理与人工监督仍需单独验证。</p>
+      </div></div>
+    </section>
+
+    <section id="run">
+      <div class="section-head"><span class="index">RUN / 05</span><div><h2>在这个仓库启动</h2><p>已按当前代码的配置安装后端和前端依赖。下面是本地开发模式的启动方式。</p></div></div>
+      <div class="setup-grid">
+        <article class="card"><div class="tag">Backend · Python / uv</div><h3>配置模型，再启动 API</h3><div class="codebox"><span class="comment"># 在仓库根目录：安装 Python 依赖</span><br>uv sync --python 3.12<br><span class="comment"># 复制模板，并在 agent/.env 配置 LLM Provider 与模型</span><br>cp agent/.env.example agent/.env<br>uv run vibe-trading serve --port 8899</div></article>
+        <article class="card"><div class="tag">Frontend · React / Vite</div><h3>另开终端启动 Web UI</h3><div class="codebox">cd frontend<br>npm ci<br>npm run dev -- --host 127.0.0.1<br><span class="comment"># 浏览器访问 http://localhost:5899</span></div></article>
+      </div>
+      <div style="height:14px"></div>
+      <div class="grid two">
+        <article class="card"><div class="tag">CLI only</div><h3>只用终端</h3><p>配置好 <code>agent/.env</code> 后运行 <code>uv run vibe-trading</code> 进入交互界面。一次性任务可使用 <code>uv run vibe-trading run -p "..."</code>。</p></article>
+        <article class="card"><div class="tag">Credentials</div><h3>运行前的配置边界</h3><p>LLM Key / 本地 Ollama 用于模型推理；市场数据 Key 通常按数据源可选；券商账号用于连接器。安装包不会自动创建这些授权。可以先用免费行情源体验研究流程。</p></article>
+      </div>
+    </section>
+
+    <footer class="foot"><strong>Vibe-Trading · 项目导览</strong><span>依据仓库 README_zh.md、pyproject.toml、agent/SKILL.md 与当前目录结构整理 · 版本 0.1.16</span></footer>
+  </div>
+</body>
+</html>

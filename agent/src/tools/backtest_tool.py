@@ -1,4 +1,4 @@
-"""Backtest execution tool: validates config.json + signal_engine.py and runs the built-in engine."""
+"""Backtest execution tool for legacy SignalEngine and trusted BT backends."""
 
 from __future__ import annotations
 
@@ -97,14 +97,27 @@ def run_backtest(run_dir: str) -> str:
     if config["source"] not in VALID_SOURCES:
         return json.dumps({"status": "error", "error": f"source must be one of {VALID_SOURCES}, got: {config['source']}"}, ensure_ascii=False)
 
-    signal_path = run_path / "code" / "signal_engine.py"
-    if not signal_path.exists():
+    execution_backend = config.get("execution_backend", "legacy")
+    if execution_backend == "legacy":
+        signal_path = run_path / "code" / "signal_engine.py"
+        if not signal_path.exists():
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"code/signal_engine.py not found in {run_path}",
+                    "hint": "signal_engine.py belongs in code/ inside run_dir.",
+                },
+                ensure_ascii=False,
+            )
+    elif execution_backend == "backtrader":
+        if not isinstance(config.get("strategy_spec"), dict):
+            return json.dumps(
+                {"status": "error", "error": "Backtrader execution requires a frozen strategy_spec"},
+                ensure_ascii=False,
+            )
+    else:
         return json.dumps(
-            {
-                "status": "error",
-                "error": f"code/signal_engine.py not found in {run_path}",
-                "hint": "signal_engine.py belongs in code/ inside run_dir.",
-            },
+            {"status": "error", "error": f"unsupported execution_backend: {execution_backend}"},
             ensure_ascii=False,
         )
 

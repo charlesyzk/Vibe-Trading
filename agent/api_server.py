@@ -8,6 +8,7 @@ infrastructure lives in ``src.api.{security,models,helpers,state}``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -107,9 +108,13 @@ from src.api.state import (  # noqa: F401, E402
     _channel_manager,
     _channel_runtime,
     _get_channel_runtime,
+    _get_paper_execution_manager,
+    _get_paper_execution_readiness,
+    _set_paper_execution_composition,
     _get_session_service,
     _session_service,
 )
+from src.execution.paper_execution_composition import PaperExecutionComposition
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -143,13 +148,65 @@ async def _run_startup_preflight() -> None:
         await _start_channel_runtime()
 
 
+def configure_paper_execution_app(
+    composition: PaperExecutionComposition,
+    *,
+    target_app: FastAPI | None = None,
+) -> None:
+    """Register a trusted PAPER composition for a FastAPI app.
+
+    This is an explicit deployment hook. It does not connect to IBKR; runtime
+    startup remains behind the manager's authenticated, readiness-gated start
+    control path.
+    """
+    if not isinstance(composition, PaperExecutionComposition):
+        raise TypeError("composition must be a PaperExecutionComposition")
+    selected_app = target_app if target_app is not None else app
+    selected_app.state.paper_execution_composition = composition
+
+
+def _install_paper_execution_app_composition(target_app: FastAPI) -> None:
+    """Install typed app-root composition, or establish the inert default."""
+    composition = getattr(target_app.state, "paper_execution_composition", None)
+    if composition is None:
+        # Materialize app-local defaults at startup so status and shutdown
+        # observe the same manager even when no production composition exists.
+        _get_paper_execution_manager(target_app)
+        _get_paper_execution_readiness(target_app)
+        return
+    if not isinstance(composition, PaperExecutionComposition):
+        raise RuntimeError("invalid PAPER app composition")
+    _set_paper_execution_composition(
+        composition.manager,
+        composition.readiness,
+        app=target_app,
+        scope=composition.scope,
+    )
+
+
 @asynccontextmanager
-async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Run API startup and guaranteed reverse-order shutdown."""
     try:
+        _install_paper_execution_app_composition(app)
         await _run_startup_preflight()
         yield
     finally:
+        try:
+            manager = _get_paper_execution_manager(app)
+            stopped = await asyncio.to_thread(manager.shutdown_active_runtime)
+            if not stopped:
+                logger.warning(
+                    "PAPER runtime did not confirm safe application shutdown; "
+                    "manager entry and owner lease remain retained"
+                )
+        except Exception as exc:
+            # Avoid logging runtime exception text, which could include
+            # configured account or endpoint details.
+            logger.error(
+                "PAPER runtime shutdown failed (%s); operator recovery may be required",
+                type(exc).__name__,
+            )
         await _stop_scheduled_research_on_shutdown()
 
 
@@ -248,6 +305,10 @@ from src.api.swarm_routes import _get_swarm_runtime  # noqa: F401, E402
 # --- Live trading ---
 from src.api.live_routes import register_live_routes  # noqa: E402
 register_live_routes(app)
+
+# --- Managed IBKR PAPER runtime status (read-only) ---
+from src.api.paper_execution_routes import register_paper_execution_routes  # noqa: E402
+register_paper_execution_routes(app)
 
 # --- Read-only portfolio dashboard ---
 from src.api.portfolio_routes import register_portfolio_routes  # noqa: E402

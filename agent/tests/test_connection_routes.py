@@ -93,3 +93,30 @@ def test_connection_routes_reject_credentials_not_declared_by_profile(tmp_path, 
         json={"values": {"withdrawal_token": "must-not-be-accepted"}},
     )
     assert response.status_code == 400
+
+
+def test_ibkr_connection_check_accepts_only_environment_matching_local_ports(tmp_path, monkeypatch):
+    store = ConnectionStore(
+        tmp_path / "connections.json",
+        credential_store=CredentialStore(_MemoryCredentials()),
+    )
+    store.create("paper-gateway", "ibkr-paper-local", "Paper Gateway")
+    calls = []
+    monkeypatch.setattr(connection_routes, "ConnectionStore", lambda: store)
+    monkeypatch.setattr(
+        connection_routes,
+        "check_connection",
+        lambda profile_id, **kwargs: calls.append((profile_id, kwargs)) or {"status": "ok"},
+    )
+    app = FastAPI()
+    connection_routes.register_connection_routes(app)
+    client = TestClient(app)
+
+    checked = client.post("/api/connections/paper-gateway/check", json={"port": 4002})
+    assert checked.status_code == 200
+    assert calls[-1][0] == "ibkr-paper-local"
+    assert calls[-1][1]["port"] == 4002
+
+    rejected = client.post("/api/connections/paper-gateway/check", json={"port": 4001})
+    assert rejected.status_code == 503
+    assert len(calls) == 1

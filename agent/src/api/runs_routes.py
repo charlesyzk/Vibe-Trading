@@ -6,20 +6,28 @@ Mounted by ``agent/api_server.py`` via ``register_runs_routes(app, ...)``.
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import json
 import math
 import os
+import re
+import secrets
+import sqlite3
 import statistics
 import threading
+import time
+import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Deque, Dict, Generator, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, Generator, List, Literal, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +43,308 @@ _FACTOR_MAX_TOTAL_ARTIFACT_BYTES = 8 * 1024 * 1024
 _FACTOR_MAX_ROWS_PER_CSV = 5000
 _FACTOR_MAX_TOTAL_ROWS = 20_000
 _FACTOR_MAX_GROUP_COLUMNS = 100
+_PREVIEW_AUTHORIZATION_MAX_SINGLE_BYTES = 80 * 1024 * 1024
+_PREVIEW_AUTHORIZATION_MAX_ACTIVE_BYTES = 256 * 1024 * 1024
+_BACKTRADER_RUN_DEFAULTS: Dict[str, Any] = {
+    "strategy_budget": 40_000,
+    "fee_reserve": 25,
+    "price_buffer_fraction": 0.01,
+    "commission_rate": 0.001,
+    "slippage_fraction": 0.0,
+    "initial_cash": 100_000,
+    "interval": "1D",
+    "engine": "daily",
+    "execution_backend": "backtrader",
+}
+
+
+class BacktraderBacktestRequest(BaseModel):
+    """Bounded request for the first user-created trusted-template run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(min_length=1, max_length=32)
+    instrument_id: str = Field(min_length=1, max_length=64)
+    start_date: str
+    end_date: str
+    source: Literal["yfinance", "stooq", "ibkr"] = "yfinance"
+    ibkr_profile_id: Optional[Literal["ibkr-paper-local", "ibkr-live-local-readonly"]] = None
+    ibkr_port: Optional[Literal[4001, 4002, 7496, 7497]] = None
+    strategy_description: str = Field(min_length=1, max_length=4096)
+    allocation_fraction: float = Field(default=0.95, gt=0, le=1, allow_inf_nan=False)
+    preview_token: Optional[str] = Field(default=None, min_length=32, max_length=128)
+    clarification_transcript_id: Optional[str] = Field(default=None, max_length=36)
+    clarification_turn_id: Optional[str] = Field(default=None, max_length=36)
+    clarification_parent_turn_id: Optional[str] = Field(default=None, max_length=36)
+    clarification_answer: Optional[str] = Field(default=None, max_length=512)
+
+    @field_validator("symbol")
+    @classmethod
+    def valid_symbol(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,31}", value):
+            raise ValueError("symbol contains unsupported characters")
+        return value
+
+    @field_validator("instrument_id")
+    @classmethod
+    def valid_instrument_id(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", value):
+            raise ValueError("instrument_id contains unsupported characters")
+        return value
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def valid_iso_date(cls, value: str) -> str:
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("dates must use YYYY-MM-DD") from None
+        return value
+
+    @field_validator("strategy_description")
+    @classmethod
+    def normalized_strategy_language(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def valid_request_window(self) -> "BacktraderBacktestRequest":
+        start = datetime.strptime(self.start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(self.end_date, "%Y-%m-%d").date()
+        if start > end:
+            raise ValueError("start_date must be on or before end_date")
+        if (end - start).days > 3653:
+            raise ValueError("date range is limited to ten years")
+        if self.source == "ibkr" and self.ibkr_profile_id is None:
+            raise ValueError("ibkr_profile_id is required for IBKR history")
+        valid_ibkr_ports = {4002, 7497} if self.ibkr_profile_id == "ibkr-paper-local" else {4001, 7496}
+        if self.ibkr_port is not None and (
+            self.source != "ibkr" or self.ibkr_port not in valid_ibkr_ports
+        ):
+            raise ValueError("ibkr_port must match the selected IBKR read-only environment")
+        if self.source != "ibkr" and self.ibkr_profile_id is not None:
+            raise ValueError("ibkr_profile_id is only valid when source is ibkr")
+        return self
+
+
+class PythonUploadSessionRequest(BaseModel):
+    """One caller-supplied regular session used to validate an imported bar."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_date: date
+    open_at: datetime
+    close_at: datetime
+    early_close: bool = False
+
+
+class IbkrPythonMarketDataRequest(BaseModel):
+    """Request an exact, read-only IBKR daily snapshot for Python upload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(min_length=1, max_length=32)
+    instrument_id: str = Field(min_length=1, max_length=64)
+    profile_id: Literal["ibkr-paper-local", "ibkr-live-local-readonly"]
+    port: Optional[Literal[4001, 4002, 7496, 7497]] = None
+    warmup_start: date
+    warmup_end: date
+    evaluation_start: date
+    evaluation_end: date
+
+    @field_validator("symbol")
+    @classmethod
+    def valid_ibkr_symbol(cls, value: str) -> str:
+        value = value.strip().upper()
+        if not re.fullmatch(r"[A-Z0-9][A-Z0-9._:-]{0,31}", value):
+            raise ValueError("symbol contains unsupported characters")
+        return value
+
+    @field_validator("instrument_id")
+    @classmethod
+    def valid_ibkr_instrument(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", value):
+            raise ValueError("instrument_id contains unsupported characters")
+        return value
+
+    @model_validator(mode="after")
+    def valid_ibkr_window(self) -> "IbkrPythonMarketDataRequest":
+        if not (
+            self.warmup_start <= self.warmup_end < self.evaluation_start <= self.evaluation_end
+        ):
+            raise ValueError("date ranges must satisfy warmup_start <= warmup_end < evaluation_start <= evaluation_end")
+        if (self.evaluation_end - self.warmup_start).days > 3653:
+            raise ValueError("date range is limited to ten years")
+        valid_ports = {4002, 7497} if self.profile_id == "ibkr-paper-local" else {4001, 7496}
+        if self.port is not None and self.port not in valid_ports:
+            raise ValueError("socket port does not match the selected IBKR environment")
+        return self
+
+
+class PythonUploadBacktestRequest(BaseModel):
+    """Bounded Python-upload offline backtest with explicit bar evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_id: str = Field(min_length=1, max_length=64)
+    instrument_id: str = Field(min_length=1, max_length=64)
+    strategy_source: str = Field(min_length=1, max_length=262_144)
+    market_data_csv: str = Field(min_length=1, max_length=64 * 1024 * 1024)
+    market_data_metadata: Dict[str, Any]
+    expected_sessions: List[PythonUploadSessionRequest] = Field(min_length=1, max_length=100_000)
+    initial_cash: float = Field(default=100_000, gt=0, allow_inf_nan=False)
+    commission_rate: float = Field(default=0.001, ge=0, le=1, allow_inf_nan=False)
+    slippage_fraction: float = Field(default=0.0, ge=0, le=0.25, allow_inf_nan=False)
+    preview_token: Optional[str] = Field(default=None, min_length=32, max_length=128)
+
+    @field_validator("strategy_id", "instrument_id")
+    @classmethod
+    def valid_python_identity(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", value):
+            raise ValueError("identity contains unsupported characters")
+        return value
+
+    @field_validator("strategy_source")
+    @classmethod
+    def require_python_callback(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("strategy_source must not be blank")
+        if len(value.encode("utf-8")) > 256 * 1024:
+            raise ValueError("strategy source exceeds 256 KiB")
+        return value
+
+    @field_validator("market_data_csv")
+    @classmethod
+    def require_bounded_csv_text(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 64 * 1024 * 1024:
+            raise ValueError("market-data CSV exceeds 64 MiB")
+        return value
+
+
+class PythonUploadBacktestConfirmationRequest(BaseModel):
+    """Confirmation identity; market data is loaded from the preview token."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_id: str = Field(min_length=1, max_length=64)
+    instrument_id: str = Field(min_length=1, max_length=64)
+    strategy_source: str = Field(min_length=1, max_length=262_144)
+    initial_cash: float = Field(default=100_000, gt=0, allow_inf_nan=False)
+    commission_rate: float = Field(default=0.001, ge=0, le=1, allow_inf_nan=False)
+    slippage_fraction: float = Field(default=0.0, ge=0, le=0.25, allow_inf_nan=False)
+    preview_token: Optional[str] = Field(default=None, min_length=32, max_length=128)
+    # Accepted for compatibility with clients that still resend the preview
+    # body. These fields are deliberately ignored; execution loads the stored
+    # preview snapshot and never trusts confirmation-time market data.
+    market_data_csv: Optional[str] = Field(default=None, min_length=1, max_length=64 * 1024 * 1024)
+    market_data_metadata: Optional[Dict[str, Any]] = None
+    expected_sessions: Optional[List[PythonUploadSessionRequest]] = Field(default=None, max_length=100_000)
+
+    @field_validator("strategy_id", "instrument_id")
+    @classmethod
+    def valid_python_identity(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", value):
+            raise ValueError("identity contains unsupported characters")
+        return value
+
+    @field_validator("strategy_source")
+    @classmethod
+    def require_bounded_strategy_source(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value.encode("utf-8")) > 256 * 1024:
+            raise ValueError("strategy source must be non-empty and at most 256 KiB")
+        return value
+
+    @field_validator("market_data_csv")
+    @classmethod
+    def require_bounded_optional_csv(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and len(value.encode("utf-8")) > 64 * 1024 * 1024:
+            raise ValueError("market-data CSV exceeds 64 MiB")
+        return value
+
+
+def _parse_trusted_sma_description(value: str) -> Tuple[int, int]:
+    """Parse only the complete, explicitly supported SMA-cross sentences.
+
+    This small grammar avoids pretending to understand filters, stops, or
+    other conditions that the current compiler cannot execute. A later NL2
+    model may produce this same frozen representation after clarification.
+    """
+    text = " ".join(value.strip().split())
+    chinese = re.fullmatch(
+        r"(?:当)?(?P<fast>\d+)(?:日|天)?(?:SMA|均线)(?:上穿|金叉)"
+        r"(?P<slow>\d+)(?:日|天)?(?:SMA|均线)(?:买入|开仓|做多)?"
+        r"[，,；;。 ]+(?:当)?(?P=fast)(?:日|天)?(?:SMA|均线)(?:下穿|死叉)"
+        r"(?P=slow)(?:日|天)?(?:SMA|均线)(?:卖出|平仓|清仓)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    english = re.fullmatch(
+        r"(?:buy|enter) when (?P<fast>\d+)[ -]day (?:SMA|moving average) crosses above "
+        r"(?P<slow>\d+)[ -]day (?:SMA|moving average); (?:sell|exit) when "
+        r"(?P=fast)[ -]day (?:SMA|moving average) crosses below "
+        r"(?P=slow)[ -]day (?:SMA|moving average)\.?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    match = chinese or english
+    if match is None:
+        raise ValueError(
+            "unsupported strategy description; use the complete supported SMA cross rule "
+            "(fast average crosses above slow to enter, and below to exit). Extra conditions are not supported"
+        )
+    fast, slow = int(match.group("fast")), int(match.group("slow"))
+    if not (1 <= fast < slow <= 250):
+        raise ValueError("SMA periods must satisfy 1 <= fast < slow <= 250")
+    return fast, slow
+
+
+def _public_python_strategy_failure(exc: Exception) -> dict[str, Any] | None:
+    """Build a safe, bounded API failure from trusted normalized runtime fields."""
+    from src.bt_runtime.strategies.python_upload import PythonStrategyRunError
+
+    if not isinstance(exc, PythonStrategyRunError):
+        return None
+    failure = exc.public_failure if isinstance(exc.public_failure, dict) else {}
+    category = failure.get("category")
+    if category not in {"strategy_runtime_error", "strategy_contract_error"}:
+        category = "strategy_execution_error"
+    error_type = failure.get("error_type")
+    allowed_types = {
+        "AssertionError", "AttributeError", "IndexError", "KeyError", "NameError",
+        "OverflowError", "TypeError", "ValueError", "ZeroDivisionError", "OtherError",
+    }
+    if error_type not in allowed_types:
+        error_type = None
+    seq = exc.event_seq if type(exc.event_seq) is int and 1 <= exc.event_seq <= 100_000 else None
+    source_line = failure.get("source_line")
+    if type(source_line) is not int or not 1 <= source_line <= 262_144:
+        source_line = None
+    if category == "strategy_runtime_error":
+        message = "Strategy code raised an error"
+        if error_type:
+            message += f" ({error_type})"
+        if source_line:
+            message += f" on source line {source_line}"
+    elif category == "strategy_contract_error":
+        message = "Strategy output did not match the required on_event contract"
+    else:
+        message = "Strategy execution failed validation"
+    if seq is not None:
+        message = f"Bar {seq}: {message}"
+    return {
+        "status": "failed",
+        "error_code": category,
+        "event_seq": seq,
+        "error_type": error_type,
+        "source_line": source_line,
+        "message": message,
+    }
 
 
 def _load_json_file(path: Path) -> Optional[Dict[str, Any]]:
@@ -697,6 +1007,56 @@ def _build_response_from_run_dir(
     design_path = run_dir / "design_spec.json"
     response.strategy_spec = _load_json_file(design_path)
 
+    config_data = _load_json_file(run_dir / "config.json") or {}
+    if response.strategy_spec is None and isinstance(config_data.get("strategy_spec"), dict):
+        response.strategy_spec = config_data["strategy_spec"]
+    response.execution_backend = config_data.get("execution_backend")
+
+    execution_report_path = run_dir / "artifacts" / "execution_report.json"
+    from src.bt_runtime.report_artifact_integrity import (
+        EXPECTED_SCHEMA_CONFIG_KEY,
+        SCHEMA_VERSION as REPORT_INTEGRITY_SCHEMA,
+        load_verified_report,
+        sidecar_path,
+    )
+
+    integrity_marker_present = EXPECTED_SCHEMA_CONFIG_KEY in config_data
+    report_expected = config_data.get(EXPECTED_SCHEMA_CONFIG_KEY) == REPORT_INTEGRITY_SCHEMA
+    report_exists = execution_report_path.is_file()
+    report_sidecar_exists = sidecar_path(execution_report_path).is_file()
+    integrity_status: str
+    integrity_error: str | None = None
+    execution_report = None
+    if integrity_marker_present or report_sidecar_exists or report_exists:
+        if integrity_marker_present and not report_expected:
+            integrity_status = "invalid"
+            integrity_error = "run config declares an unsupported execution report integrity schema"
+        elif integrity_marker_present or report_sidecar_exists:
+            execution_report, integrity_error = load_verified_report(execution_report_path)
+            integrity_status = "verified" if execution_report is not None else "invalid"
+        elif report_exists:
+            # Pre-sidecar runs remain readable, but are never presented as verified.
+            execution_report = _load_json_file(execution_report_path)
+            if not isinstance(execution_report, dict):
+                execution_report = None
+                integrity_status = "invalid"
+                integrity_error = "legacy execution report is missing, unreadable, or invalid JSON"
+            else:
+                integrity_status = "unverified_legacy"
+        else:
+            integrity_status = "invalid"
+            integrity_error = "expected execution report is missing"
+        response.execution_report_integrity = {
+            "status": integrity_status,
+            **({"error": integrity_error} if integrity_error else {}),
+        }
+    if isinstance(execution_report, dict):
+        response.execution_report = execution_report
+        response.execution_backend = execution_report.get("execution_backend") or response.execution_backend
+        response.execution_mode = execution_report.get("execution_mode")
+        response.strategy_version_id = execution_report.get("strategy_version_id")
+        response.strategy_version_hash = execution_report.get("strategy_version_hash")
+
     rag_path = run_dir / "rag_metadata.json"
     rag_data = _load_json_file(rag_path)
     if rag_data:
@@ -865,11 +1225,1041 @@ def register_runs_routes(
         h = _sys.modules.get("api_server") or _sys.modules.get("agent.api_server")
         return h.RUNS_DIR
 
+    def _strategy_spec_for_request(request: BacktraderBacktestRequest) -> Dict[str, Any]:
+        from src.execution.strategy_design import configured_strategy_intent
+
+        intent = configured_strategy_intent(request.strategy_description)
+        template_id = intent["template_id"]
+        parameters = intent["parameters"]
+        if template_id == "sma_cross":
+            strategy_id = f"sma-cross-{parameters['fast_period']}-{parameters['slow_period']}"
+        else:
+            strategy_id = f"rsi-threshold-{parameters['period']}-{parameters['entry_below']}-{parameters['exit_above']}"
+        return {
+            "schema_version": "1.0",
+            "strategy_id": strategy_id,
+            "source_kind": "natural_language_template",
+            "template_id": template_id,
+            "template_version": "1.0",
+            "instrument_ids": [request.instrument_id],
+            "bar_policy": {
+                "timeframe": "1d",
+                "session": "regular",
+                "completed_only": True,
+                "calendar_id": "us_equity_rth",
+                "timezone": "America/New_York",
+            },
+            "parameters": parameters,
+            "position_policy": {
+                "mode": "target_fraction",
+                "long_only": True,
+                "whole_shares": True,
+                "allocation_fraction": request.allocation_fraction,
+                "rebalance": "on_signal_transition",
+                "initial_entry": "wait_for_cross",
+            },
+            "execution_policy": {
+                "decision": "completed_bar_available",
+                "dispatch": "next_regular_session",
+                "order_type": "market",
+                "time_in_force": "DAY",
+                "outside_rth": False,
+                "gap_action": "skip",
+                "missed_session_action": "expire",
+            },
+        }
+
+    def _strategy_template_identity() -> Dict[str, str]:
+        from src.bt_runtime.strategies import sma as sma_runtime
+
+        return {
+            "source_sha256": sma_runtime.TRUSTED_TEMPLATE_SOURCE_SHA256,
+            "compiler_version": sma_runtime.TRUSTED_TEMPLATE_COMPILER_VERSION,
+        }
+
+    def _review_hash_for_request(
+        request: BacktraderBacktestRequest,
+        strategy_spec: Dict[str, Any],
+        template_identity: Dict[str, str],
+        market_snapshot: Dict[str, Any],
+    ) -> str:
+        payload = {
+            "request": request.model_dump(exclude={
+                "preview_token", "clarification_transcript_id", "clarification_turn_id",
+                "clarification_parent_turn_id", "clarification_answer",
+            }, mode="json"),
+            "strategy_spec": strategy_spec,
+            "run_defaults": _BACKTRADER_RUN_DEFAULTS,
+            "engine_version": "1.9.78.123",
+            "template_identity": template_identity,
+            "market_data_sha256": market_snapshot["data_sha256"],
+            "data_manifest_sha256": market_snapshot["manifest_sha256"],
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _strategy_request_hash(request: BacktraderBacktestRequest) -> str:
+        encoded = json.dumps(
+            request.model_dump(exclude={
+                "preview_token", "clarification_transcript_id", "clarification_turn_id",
+                "clarification_parent_turn_id", "clarification_answer",
+            }, mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _python_upload_confirmation_request_hash(
+        request: PythonUploadBacktestConfirmationRequest,
+    ) -> str:
+        identity = {
+            "strategy_id": request.strategy_id,
+            "instrument_id": request.instrument_id,
+            "strategy_source": request.strategy_source,
+            "initial_cash": request.initial_cash,
+            "commission_rate": request.commission_rate,
+            "slippage_fraction": request.slippage_fraction,
+        }
+        encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _python_upload_snapshot_for_request(request: PythonUploadBacktestRequest) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {
+            "schema_version": "python-upload-market-snapshot/1",
+            "market_data_csv": request.market_data_csv,
+            "market_data_metadata": request.market_data_metadata,
+            "expected_sessions": [item.model_dump(mode="json") for item in request.expected_sessions],
+        }
+        encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        encoded_bytes = encoded.encode("utf-8")
+        if len(encoded_bytes) > _PREVIEW_AUTHORIZATION_MAX_SINGLE_BYTES:
+            raise ValueError("Python upload preview snapshot exceeds 80 MiB")
+        snapshot["snapshot_sha256"] = hashlib.sha256(encoded_bytes).hexdigest()
+        return snapshot
+
+    def _validated_python_upload_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        if set(snapshot) != {
+            "schema_version", "market_data_csv", "market_data_metadata", "expected_sessions", "snapshot_sha256",
+        }:
+            raise ValueError("Python upload preview snapshot fields are invalid")
+        if snapshot.get("schema_version") != "python-upload-market-snapshot/1":
+            raise ValueError("Python upload preview snapshot has an unsupported schema")
+        supplied_hash = snapshot.get("snapshot_sha256")
+        payload = {key: value for key, value in snapshot.items() if key != "snapshot_sha256"}
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if not isinstance(supplied_hash, str) or hashlib.sha256(encoded.encode("utf-8")).hexdigest() != supplied_hash:
+            raise ValueError("Python upload preview snapshot integrity check failed")
+        if not isinstance(payload.get("market_data_csv"), str) or not isinstance(payload.get("market_data_metadata"), dict):
+            raise ValueError("Python upload preview snapshot is incomplete")
+        if not isinstance(payload.get("expected_sessions"), list):
+            raise ValueError("Python upload preview schedule is incomplete")
+        return payload
+
+    def _issue_preview_token(
+        review_hash: str,
+        *,
+        request_hash: Optional[str] = None,
+        strategy_spec: Optional[Dict[str, Any]] = None,
+        market_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        token = secrets.token_urlsafe(32)
+        strategy_spec_json = (
+            json.dumps(strategy_spec, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if strategy_spec is not None else None
+        )
+        market_snapshot_json = (
+            json.dumps(market_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if market_snapshot is not None else None
+        )
+        new_payload_bytes = sum(
+            len(value.encode("utf-8")) for value in (strategy_spec_json, market_snapshot_json) if value is not None
+        )
+        if new_payload_bytes > _PREVIEW_AUTHORIZATION_MAX_SINGLE_BYTES:
+            raise HTTPException(status_code=413, detail="preview authorization payload exceeds the storage limit")
+        runs_dir = _host_RUNS_DIR()
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        database = runs_dir / ".backtest_preview_authorizations.sqlite3"
+        connection = sqlite3.connect(database, timeout=10)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            with connection:
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS preview_authorizations ("
+                    "token_hash TEXT PRIMARY KEY, review_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, "
+                    "consumed_at INTEGER, request_hash TEXT, strategy_spec_json TEXT, market_snapshot_json TEXT)"
+                )
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(preview_authorizations)")}
+                if "request_hash" not in columns:
+                    connection.execute("ALTER TABLE preview_authorizations ADD COLUMN request_hash TEXT")
+                if "strategy_spec_json" not in columns:
+                    connection.execute("ALTER TABLE preview_authorizations ADD COLUMN strategy_spec_json TEXT")
+                if "market_snapshot_json" not in columns:
+                    connection.execute("ALTER TABLE preview_authorizations ADD COLUMN market_snapshot_json TEXT")
+                now_epoch = int(time.time())
+                connection.execute(
+                    "DELETE FROM preview_authorizations WHERE expires_at < ? OR consumed_at IS NOT NULL",
+                    (now_epoch,),
+                )
+                pending_payload_bytes = connection.execute(
+                    "SELECT COALESCE(SUM(COALESCE(length(CAST(strategy_spec_json AS BLOB)), 0) + "
+                    "COALESCE(length(CAST(market_snapshot_json AS BLOB)), 0)), 0) "
+                    "FROM preview_authorizations WHERE expires_at >= ? AND consumed_at IS NULL",
+                    (now_epoch,),
+                ).fetchone()[0]
+                if pending_payload_bytes + new_payload_bytes > _PREVIEW_AUTHORIZATION_MAX_ACTIVE_BYTES:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="too many unconfirmed previews; confirm an existing preview or wait for expiry",
+                    )
+                connection.execute(
+                    "INSERT INTO preview_authorizations(token_hash, review_hash, expires_at, request_hash, "
+                    "strategy_spec_json, market_snapshot_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        hashlib.sha256(token.encode("ascii")).hexdigest(),
+                        review_hash,
+                        now_epoch + 600,
+                        request_hash,
+                        strategy_spec_json,
+                        market_snapshot_json,
+                    ),
+                )
+        finally:
+            connection.close()
+        try:
+            database.chmod(0o600)
+        except OSError:
+            pass
+        return token
+
+    def _load_preview_strategy_spec(token: str | None, request_hash: str) -> Optional[Dict[str, Any]]:
+        if not token:
+            return None
+        database = _host_RUNS_DIR() / ".backtest_preview_authorizations.sqlite3"
+        if not database.is_file():
+            return None
+        token_hash = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest()
+        connection = sqlite3.connect(database, timeout=10)
+        try:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(preview_authorizations)")}
+            if not {"request_hash", "strategy_spec_json"}.issubset(columns):
+                return None
+            row = connection.execute(
+                "SELECT strategy_spec_json FROM preview_authorizations WHERE token_hash = ? "
+                "AND request_hash = ? AND expires_at >= ? AND consumed_at IS NULL",
+                (token_hash, request_hash, int(time.time())),
+            ).fetchone()
+            if row is None or not row[0]:
+                return None
+            value = json.loads(row[0])
+            return value if isinstance(value, dict) else None
+        except (sqlite3.Error, json.JSONDecodeError):
+            return None
+        finally:
+            connection.close()
+
+    def _load_preview_market_snapshot(token: str | None, request_hash: str) -> Optional[Dict[str, Any]]:
+        if not token:
+            return None
+        database = _host_RUNS_DIR() / ".backtest_preview_authorizations.sqlite3"
+        if not database.is_file():
+            return None
+        token_hash = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest()
+        connection = sqlite3.connect(database, timeout=10)
+        try:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(preview_authorizations)")}
+            if not {"request_hash", "market_snapshot_json"}.issubset(columns):
+                return None
+            row = connection.execute(
+                "SELECT market_snapshot_json FROM preview_authorizations WHERE token_hash = ? "
+                "AND request_hash = ? AND expires_at >= ? AND consumed_at IS NULL",
+                (token_hash, request_hash, int(time.time())),
+            ).fetchone()
+            if row is None or not row[0]:
+                return None
+            value = json.loads(row[0])
+            return value if isinstance(value, dict) else None
+        except (sqlite3.Error, json.JSONDecodeError):
+            return None
+        finally:
+            connection.close()
+
+    def _consume_preview_token(token: str | None, review_hash: str) -> bool:
+        if not token:
+            return False
+        runs_dir = _host_RUNS_DIR()
+        database = runs_dir / ".backtest_preview_authorizations.sqlite3"
+        if not database.is_file():
+            return False
+        token_hash = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest()
+        now_epoch = int(time.time())
+        connection = sqlite3.connect(database, timeout=10, isolation_level=None)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT 1 FROM preview_authorizations WHERE token_hash = ? AND review_hash = ? "
+                "AND expires_at >= ? AND consumed_at IS NULL",
+                (token_hash, review_hash, now_epoch),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(preview_authorizations)")}
+            clear_columns = [name for name in ("strategy_spec_json", "market_snapshot_json") if name in columns]
+            clear_sql = "".join(f", {name} = NULL" for name in clear_columns)
+            cursor = connection.execute(
+                f"UPDATE preview_authorizations SET consumed_at = ?{clear_sql} "
+                "WHERE token_hash = ? AND consumed_at IS NULL",
+                (now_epoch, token_hash),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+        finally:
+            connection.close()
+
+    def _prepare_python_upload(
+        request: PythonUploadBacktestRequest,
+        *,
+        worker_image: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Validate uploaded source and market data without creating durable run artifacts."""
+        import backtrader as bt
+        from src.bt_runtime.market_data import MarketDataMetadata, MarketSession, import_completed_daily_csv
+        from src.bt_runtime.calendars import (
+            CALENDAR_ID, CALENDAR_TIMEZONE, EXPECTED_CALENDAR_VERSION, build_xnys_schedule,
+        )
+        from src.execution.contracts import StrategySpec, canonical_sha256
+        from src.execution.event_worker import PYTHON_WORKER_COMPILER_VERSION
+        from src.execution.python_sandbox import validate_worker_image_identity
+        from src.execution.strategy_source_policy import validate_strategy_source, StrategySourcePolicyError
+
+        metadata = MarketDataMetadata.model_validate(request.market_data_metadata)
+        if metadata.instrument_id != request.instrument_id:
+            raise ValueError("market-data metadata instrument must match request.instrument_id")
+        if (metadata.calendar_id, metadata.calendar_version, metadata.timezone) != (
+            CALENDAR_ID, EXPECTED_CALENDAR_VERSION, CALENDAR_TIMEZONE,
+        ):
+            raise ValueError(
+                f"Python upload requires {CALENDAR_ID} calendar {EXPECTED_CALENDAR_VERSION} "
+                f"in {CALENDAR_TIMEZONE}"
+            )
+        canonical_schedule = build_xnys_schedule(metadata.warmup_start, metadata.evaluation_end)
+        submitted_sessions = [MarketSession(
+            session_date=item.session_date,
+            open_at=item.open_at,
+            close_at=item.close_at,
+            early_close=item.early_close,
+        ) for item in request.expected_sessions]
+        if submitted_sessions != list(canonical_schedule.sessions):
+            raise ValueError("expected_sessions must exactly match the pinned XNYS schedule")
+        if (metadata.calendar_schedule_sha256 is not None
+                and metadata.calendar_schedule_sha256 != canonical_schedule.sha256):
+            raise ValueError("calendar_schedule_sha256 does not match the pinned XNYS schedule")
+        raw_csv = request.market_data_csv.encode("utf-8")
+        # Import against the host-generated schedule so the manifest hash is
+        # rooted in the pinned calendar even when the client omits that hash.
+        sessions = list(canonical_schedule.sessions)
+        imported = import_completed_daily_csv(raw_csv, metadata, sessions)
+        source_bytes = request.strategy_source.encode("utf-8")
+        try:
+            validate_strategy_source(request.strategy_source)
+        except StrategySourcePolicyError as exc:
+            raise ValueError(str(exc)) from exc
+
+        source_artifact_id = f"upload-{hashlib.sha256(source_bytes).hexdigest()[:16]}"
+        spec = StrategySpec.model_validate({
+            "schema_version": "1.0",
+            "strategy_id": request.strategy_id,
+            "source_kind": "python_upload",
+            "source_artifact_id": source_artifact_id,
+            "instrument_ids": [request.instrument_id],
+            "bar_policy": {
+                "timeframe": "1d", "session": "regular", "completed_only": True,
+                "calendar_id": metadata.calendar_id, "timezone": metadata.timezone,
+            },
+            "parameters": {},
+            "position_policy": {"mode": "explicit_quantity", "long_only": True, "whole_shares": True},
+            "execution_policy": {
+                "decision": "completed_bar_available", "dispatch": "next_regular_session",
+                "order_type": "market", "time_in_force": "DAY", "outside_rth": False,
+                "gap_action": "reject_and_pause", "missed_session_action": "expire_and_pause",
+            },
+        })
+        engine_version = f"backtrader/{bt.__version__}"
+        manifest_hash = canonical_sha256(imported.manifest)
+        spec_hash = canonical_sha256(spec)
+        input_hash = hashlib.sha256(json.dumps(
+            request.model_dump(exclude={"preview_token"}, mode="json"),
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        if worker_image is not None:
+            worker_image = validate_worker_image_identity(worker_image)
+        review_hash = canonical_sha256({
+            "input_hash": input_hash,
+            "strategy_spec_hash": spec_hash,
+            "data_manifest_hash": manifest_hash,
+            "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "market_data_sha256": imported.raw_sha256,
+            "engine_version": engine_version,
+            "compiler_version": PYTHON_WORKER_COMPILER_VERSION,
+            "worker_image": worker_image,
+        })
+        return {
+            "metadata": metadata,
+            "raw_csv": raw_csv,
+            "sessions": sessions,
+            "imported": imported,
+            "source_bytes": source_bytes,
+            "spec": spec,
+            "engine_version": engine_version,
+            "compiler_version": PYTHON_WORKER_COMPILER_VERSION,
+            "worker_image": worker_image,
+            "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "manifest_hash": manifest_hash,
+            "spec_hash": spec_hash,
+            "review_hash": review_hash,
+        }
+
     # Pydantic models for response_model (resolved at registration time)
     RunResponse = host.RunResponse
     RunInfo = host.RunInfo
 
     # --- Routes ---
+
+    @app.post("/runs/backtests/preview", dependencies=[Depends(require_auth)])
+    async def preview_backtrader_backtest(request: BacktraderBacktestRequest):
+        """Normalize and review a trusted template without creating a run or version."""
+        from src.execution.strategy_clarification_transcripts import (
+            ClarificationTranscriptError,
+            StrategyClarificationTranscriptStore,
+        )
+
+        runs_dir = _host_RUNS_DIR()
+        transcript_store = StrategyClarificationTranscriptStore(
+            runs_dir / ".strategy_clarification_transcripts.sqlite3",
+        )
+        transcript_context = {
+            "symbol": request.symbol,
+            "instrument_id": request.instrument_id,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "source": request.source,
+            "ibkr_profile_id": request.ibkr_profile_id,
+            "ibkr_port": request.ibkr_port,
+            "allocation_fraction": request.allocation_fraction,
+        }
+        transcript_context_sha256 = hashlib.sha256(json.dumps(
+            transcript_context, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        try:
+            clarification_fields = (
+                request.clarification_transcript_id,
+                request.clarification_turn_id,
+                request.clarification_parent_turn_id,
+                request.clarification_answer,
+            )
+            if request.clarification_transcript_id is None:
+                if any(value is not None for value in clarification_fields[1:]):
+                    raise ClarificationTranscriptError("clarification turn fields require a transcript ID")
+                transcript = transcript_store.append_initial(
+                    request.strategy_description, context_sha256=transcript_context_sha256,
+                )
+            else:
+                if any(value is None for value in clarification_fields[1:]):
+                    raise ClarificationTranscriptError("clarification turn metadata is incomplete")
+                transcript = transcript_store.append_clarification(
+                    transcript_id=request.clarification_transcript_id,
+                    turn_id=request.clarification_turn_id,
+                    parent_turn_id=request.clarification_parent_turn_id,
+                    answer=request.clarification_answer,
+                    submitted_description=request.strategy_description,
+                    context_sha256=transcript_context_sha256,
+                )
+        except ClarificationTranscriptError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        transcript_cursor = {
+            "transcript_id": transcript.transcript_id,
+            "turn_id": transcript.turn_id,
+            "turn_count": transcript.turn_count,
+        }
+        try:
+            strategy_spec = await run_in_threadpool(_strategy_spec_for_request, request)
+        except ValueError as exc:
+            from src.execution.strategy_design import clarification_form_for_error
+
+            clarification_form = clarification_form_for_error(request.strategy_description, str(exc))
+            return {
+                "supported": False,
+                "clarification": str(exc),
+                "reason": str(exc),
+                **({"clarification_form": clarification_form} if clarification_form is not None else {}),
+                "clarification_transcript": transcript_cursor,
+            }
+        try:
+            from backtest.runner import prepare_trusted_provider_market_snapshot
+            from src.execution.contracts import StrategySpec
+
+            snapshot_config = {
+                "codes": [request.symbol],
+                "instrument_id": request.instrument_id,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "source": request.source,
+                "ibkr_profile_id": request.ibkr_profile_id,
+                "ibkr_port": request.ibkr_port,
+                "interval": "1D",
+            }
+            market_snapshot = await run_in_threadpool(
+                prepare_trusted_provider_market_snapshot,
+                snapshot_config,
+                StrategySpec.model_validate(strategy_spec),
+            )
+        except ValueError as exc:
+            return {
+                "supported": False, "clarification": str(exc), "reason": str(exc),
+                "clarification_transcript": transcript_cursor,
+            }
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Market data preview failed: {type(exc).__name__}",
+            ) from exc
+        template_identity = _strategy_template_identity()
+        review_hash = _review_hash_for_request(request, strategy_spec, template_identity, market_snapshot)
+        return {
+            "supported": True,
+            "review_hash": review_hash,
+            "preview_token": _issue_preview_token(
+                review_hash,
+                request_hash=_strategy_request_hash(request),
+                strategy_spec=strategy_spec,
+                market_snapshot=market_snapshot,
+            ),
+            "template_source_sha256": template_identity["source_sha256"],
+            "compiler_version": template_identity["compiler_version"],
+            "clarification_transcript": transcript_cursor,
+            "strategy_spec": strategy_spec,
+            "summary": {
+                "symbol": request.symbol,
+                "instrument_id": request.instrument_id,
+                "strategy_description": request.strategy_description,
+                "source": request.source,
+                "ibkr_profile_id": request.ibkr_profile_id,
+                "ibkr_port": request.ibkr_port,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "allocation_fraction": request.allocation_fraction,
+                **{key: _BACKTRADER_RUN_DEFAULTS[key] for key in (
+                    "strategy_budget", "fee_reserve", "price_buffer_fraction", "commission_rate", "slippage_fraction", "initial_cash",
+                )},
+                "market_data_sha256": market_snapshot["data_sha256"],
+                "data_manifest_sha256": market_snapshot["manifest_sha256"],
+                "market_data_provider": market_snapshot["provider"],
+                "market_data_bar_count": market_snapshot["bar_count"],
+            },
+            "warnings": [
+                "Natural-language extraction can miss conditions; compare the original description with the explicit rules before confirming.",
+                "The exact CSV snapshot is frozen for confirmation and execution; provider claims, point-in-time availability, calendar authorization, adjustments, and symbol mapping remain unverified.",
+                "A supported offline preview does not authorize broker orders.",
+            ],
+        }
+
+    @app.post("/runs/backtests", dependencies=[Depends(require_auth)])
+    async def create_backtrader_backtest(request: BacktraderBacktestRequest):
+        """Run exactly the bounded trusted template reviewed in a fresh preview."""
+        from src.execution.strategy_design import known_unsupported_condition
+
+        unsupported = known_unsupported_condition(request.strategy_description)
+        if unsupported:
+            from src.execution.strategy_design import parse_fixed_rsi_description
+
+            has_reviewed_rsi_candidate = bool(
+                re.search(r"(?<![A-Za-z0-9])(?:rsi|relative strength(?: index)?)(?![A-Za-z0-9])|相对强弱", request.strategy_description, re.I)
+            ) and bool(request.preview_token)
+            try:
+                parse_fixed_rsi_description(request.strategy_description)
+                is_fixed_rsi = True
+            except ValueError:
+                is_fixed_rsi = False
+            if not is_fixed_rsi and not has_reviewed_rsi_candidate:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"condition '{unsupported}' is not supported by the trusted template",
+                )
+        strategy_spec = _load_preview_strategy_spec(request.preview_token, _strategy_request_hash(request))
+        market_snapshot = _load_preview_market_snapshot(request.preview_token, _strategy_request_hash(request))
+        if strategy_spec is None or market_snapshot is None:
+            raise HTTPException(status_code=409, detail="a fresh strategy preview and confirmation are required")
+        template_identity = _strategy_template_identity()
+        review_hash = _review_hash_for_request(request, strategy_spec, template_identity, market_snapshot)
+        if not _consume_preview_token(request.preview_token, review_hash):
+            raise HTTPException(status_code=409, detail="a fresh strategy preview and confirmation are required")
+        now = datetime.now(timezone.utc)
+        run_id = f"bt_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}"
+        runs_dir = _host_RUNS_DIR()
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = runs_dir / run_id
+        # mkdir is exclusive: a collision cannot overwrite a prior run.
+        run_dir.mkdir()
+        config: Dict[str, Any] = {
+            "codes": [request.symbol],
+            "instrument_id": request.instrument_id,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "source": request.source,
+            "ibkr_profile_id": request.ibkr_profile_id,
+            "ibkr_port": request.ibkr_port,
+            **_BACKTRADER_RUN_DEFAULTS,
+            "expected_strategy_source_hash": template_identity["source_sha256"],
+            "expected_compiler_version": template_identity["compiler_version"],
+            "strategy_spec": strategy_spec,
+        }
+        from src.bt_runtime.report_artifact_integrity import SCHEMA_VERSION as REPORT_INTEGRITY_SCHEMA
+
+        config["execution_report_integrity_schema"] = REPORT_INTEGRITY_SCHEMA
+        (run_dir / "config.json").write_text(
+            json.dumps(config, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+        )
+        (run_dir / "req.json").write_text(
+            json.dumps(
+                {
+                    "prompt": f"{request.strategy_description.strip()} ({request.symbol})",
+                    "context": {
+                        "codes": [request.symbol],
+                        "start_date": request.start_date,
+                        "end_date": request.end_date,
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "state.json").write_text(
+            json.dumps({"status": "running", "created_at": now.isoformat()}), encoding="utf-8"
+        )
+        # Keep the reviewed snapshot out of public config.json, but pass the
+        # exact same bytes and manifest to the trusted runner.
+        config["_frozen_market_data"] = market_snapshot
+        try:
+            # Import lazily so the route remains lightweight and tests can
+            # replace the provider-backed runner without importing loaders.
+            from backtest.runner import run_backtrader_backend
+
+            report = await run_in_threadpool(run_backtrader_backend, config, run_dir)
+            from src.bt_runtime.report_artifact_integrity import write_report_integrity_sidecar
+
+            write_report_integrity_sidecar(run_dir / "artifacts" / "execution_report.json")
+        except ValueError as exc:
+            (run_dir / "state.json").write_text(
+                json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            (run_dir / "state.json").write_text(
+                json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Backtest provider or engine failed: {type(exc).__name__}",
+            ) from exc
+        (run_dir / "state.json").write_text(
+            json.dumps({"status": "success", "created_at": now.isoformat()}), encoding="utf-8"
+        )
+        return {"run_id": run_id, "status": "success", "execution_report": report}
+
+    @app.post("/runs/market-data/ibkr/python-upload-preview", dependencies=[Depends(require_auth)])
+    async def preview_ibkr_market_data_for_python_upload(request: IbkrPythonMarketDataRequest):
+        """Fetch read-only IBKR daily bars and format them for the upload preview."""
+        from src.bt_runtime.calendars import (
+            CALENDAR_ID, CALENDAR_TIMEZONE, EXPECTED_CALENDAR_VERSION, build_xnys_schedule,
+        )
+        from backtest.runner import fetch_exact_ibkr_daily
+
+        try:
+            schedule = build_xnys_schedule(request.warmup_start, request.evaluation_end)
+            sessions = list(schedule.sessions)
+            session_dates = [item.session_date for item in sessions]
+            if len(sessions) > 1000:
+                raise ValueError("IBKR Python upload is limited to 1,000 daily bars per run")
+            required_dates = {
+                request.warmup_start, request.warmup_end,
+                request.evaluation_start, request.evaluation_end,
+            }
+            if not required_dates.issubset(set(session_dates)):
+                raise ValueError("all four range boundaries must be XNYS trading sessions")
+
+            fetched = await run_in_threadpool(
+                fetch_exact_ibkr_daily,
+                request.symbol,
+                request.warmup_start,
+                request.evaluation_end,
+                instrument_id=request.instrument_id,
+                profile_id=request.profile_id,
+                **({"port": request.port} if request.port is not None else {}),
+            )
+            if fetched.symbol != request.symbol:
+                raise ValueError("IBKR provider returned a different symbol")
+            frame = fetched.frame
+            returned_dates = [stamp.date() for stamp in frame.index]
+            if returned_dates != session_dates:
+                missing = sorted(set(session_dates) - set(returned_dates))
+                unexpected = sorted(set(returned_dates) - set(session_dates))
+                raise ValueError(
+                    f"IBKR bars must cover every requested XNYS session; "
+                    f"missing={missing[:5]}, unexpected={unexpected[:5]}"
+                )
+
+            output = io.StringIO(newline="")
+            writer = csv.writer(output, lineterminator="\n")
+            writer.writerow(("session_date", "start_at", "end_at", "available_at", "open", "high", "low", "close", "volume"))
+            for session, (_, row) in zip(sessions, frame.iterrows(), strict=True):
+                open_at = session.open_at.isoformat()
+                close_at = session.close_at.isoformat()
+                writer.writerow((
+                    session.session_date.isoformat(), open_at, close_at, close_at,
+                    *(format(float(row[key]), ".17g") for key in ("open", "high", "low", "close", "volume")),
+                ))
+            market_data_csv = output.getvalue()
+            if len(market_data_csv.encode("utf-8")) > 64 * 1024 * 1024:
+                raise ValueError("IBKR market-data CSV exceeds 64 MiB")
+
+            expected_sessions = [{
+                "session_date": item.session_date.isoformat(),
+                "open_at": item.open_at.isoformat(),
+                "close_at": item.close_at.isoformat(),
+                "early_close": item.early_close,
+            } for item in sessions]
+            metadata = {
+                "provider": "ibkr",
+                "instrument_id": request.instrument_id,
+                "currency": "USD",
+                "timezone": CALENDAR_TIMEZONE,
+                "calendar_id": CALENDAR_ID,
+                "calendar_version": EXPECTED_CALENDAR_VERSION,
+                "calendar_schedule_sha256": schedule.sha256,
+                "availability_model": "completed_bar_available_at_xnys_close_publication_unverified",
+                "adjustment_policy": "IBKR_TRADES_adjustment_semantics_unverified",
+                "corporate_action_policy": "IBKR_corporate_action_treatment_unverified",
+                "fetched_at": fetched.provenance["retrieved_at"],
+                "warmup_start": request.warmup_start.isoformat(),
+                "warmup_end": request.warmup_end.isoformat(),
+                "evaluation_start": request.evaluation_start.isoformat(),
+                "evaluation_end": request.evaluation_end.isoformat(),
+                "download_parameters": fetched.provenance,
+            }
+            return {
+                "supported": True,
+                "symbol": request.symbol,
+                "bar_count": len(frame),
+                "market_data_csv": market_data_csv,
+                "market_data_metadata": metadata,
+                "expected_sessions": expected_sessions,
+                "provenance": fetched.provenance,
+                "warnings": [
+                    "IBKR local API profile is asserted read-only; fetched data is frozen at the subsequent upload preview.",
+                    "Historical publication timing and adjustment semantics remain unverified.",
+                ],
+            }
+        except (ValueError, TypeError) as exc:
+            return {"supported": False, "reason": str(exc)}
+        except Exception as exc:
+            return {"supported": False, "reason": f"IBKR history request failed: {type(exc).__name__}"}
+
+    @app.post("/runs/backtests/python-upload/preview", dependencies=[Depends(require_auth)])
+    async def preview_python_upload_backtest(request: PythonUploadBacktestRequest):
+        """Validate source and imported data, then bind a short-lived confirmation token."""
+        image = os.environ.get("VIBE_PYTHON_WORKER_IMAGE", "").strip()
+        try:
+            prepared = _prepare_python_upload(request, worker_image=image or None)
+            worker_configured = prepared["worker_image"] is not None
+            frozen_upload_snapshot = _python_upload_snapshot_for_request(request) if worker_configured else None
+        except (ValueError, TypeError) as exc:
+            return {"supported": False, "reason": str(exc)}
+        token = None
+        manifest = prepared["imported"].manifest
+        if worker_configured:
+            assert frozen_upload_snapshot is not None
+            token = _issue_preview_token(
+                prepared["review_hash"],
+                request_hash=_python_upload_confirmation_request_hash(
+                    PythonUploadBacktestConfirmationRequest(
+                        strategy_id=request.strategy_id,
+                        instrument_id=request.instrument_id,
+                        strategy_source=request.strategy_source,
+                        initial_cash=request.initial_cash,
+                        commission_rate=request.commission_rate,
+                        slippage_fraction=request.slippage_fraction,
+                    )
+                ),
+                market_snapshot=frozen_upload_snapshot,
+            )
+        return {
+            "supported": True,
+            "can_run": worker_configured,
+            "worker_image_configured": worker_configured,
+            "review_hash": prepared["review_hash"],
+            "preview_token": token,
+            "backend": "backtrader",
+            "mode": "backtest",
+            "engine_version": prepared["engine_version"],
+            "compiler_version": prepared["compiler_version"],
+            "worker_image": prepared["worker_image"],
+            "strategy_spec": prepared["spec"].model_dump(mode="json"),
+            "strategy_spec_hash": prepared["spec_hash"],
+            "source_sha256": prepared["source_sha256"],
+            "market_data_sha256": prepared["imported"].raw_sha256,
+            "data_manifest_hash": prepared["manifest_hash"],
+            "data_manifest": manifest.model_dump(mode="json"),
+            "summary": {
+                "strategy_id": request.strategy_id,
+                "instrument_id": request.instrument_id,
+                "provider": manifest.provider,
+                "calendar": manifest.calendar_version,
+                "bar_count": len(prepared["imported"].bar_records),
+                "range_start": manifest.range_start.isoformat(),
+                "range_end": manifest.range_end.isoformat(),
+                "warmup_start": manifest.warmup_start.isoformat(),
+                "warmup_end": manifest.warmup_end.isoformat(),
+                "evaluation_start": manifest.evaluation_start.isoformat(),
+                "evaluation_end": manifest.evaluation_end.isoformat(),
+                "initial_cash": request.initial_cash,
+                "commission_rate": request.commission_rate,
+                "slippage_fraction": request.slippage_fraction,
+                "data_authenticity": manifest.quality_report.get("provider_attestation", "not_attested"),
+                "adjustment_attestation": manifest.quality_report.get("adjustment_attestation", "not_attested"),
+            },
+            "warnings": [
+                "Provider, calendar and adjustment labels are caller-declared and are not externally authenticated.",
+                "This confirmation authorizes an offline backtest only; it does not authorize broker access or orders.",
+            ] + ([] if worker_configured else ["The isolated Python worker image is not configured; this upload cannot run yet."]),
+        }
+
+    @app.post("/runs/backtests/python-upload", dependencies=[Depends(require_auth)])
+    async def create_python_upload_backtest(request: PythonUploadBacktestConfirmationRequest):
+        """Run the exact source/data/parameters reviewed in a fresh upload preview."""
+        image = os.environ.get("VIBE_PYTHON_WORKER_IMAGE", "").strip()
+        if not image:
+            raise HTTPException(status_code=503, detail="Python strategy worker image is not configured")
+        if not request.preview_token:
+            raise HTTPException(status_code=409, detail="a fresh Python upload preview and confirmation are required")
+        snapshot = _load_preview_market_snapshot(
+            request.preview_token,
+            _python_upload_confirmation_request_hash(request),
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=409, detail="a fresh Python upload preview and confirmation are required")
+        try:
+            frozen_snapshot = _validated_python_upload_snapshot(snapshot)
+            request = PythonUploadBacktestRequest.model_validate({
+                "strategy_id": request.strategy_id,
+                "instrument_id": request.instrument_id,
+                "strategy_source": request.strategy_source,
+                "initial_cash": request.initial_cash,
+                "commission_rate": request.commission_rate,
+                "slippage_fraction": request.slippage_fraction,
+                "market_data_csv": frozen_snapshot["market_data_csv"],
+                "market_data_metadata": frozen_snapshot["market_data_metadata"],
+                "expected_sessions": frozen_snapshot["expected_sessions"],
+                "preview_token": request.preview_token,
+            })
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=409, detail="Python upload preview snapshot failed integrity validation") from exc
+        try:
+            from src.bt_runtime.strategies.python_upload_service import run_python_upload_service
+            from src.execution.python_sandbox import PythonSandbox
+            from src.execution.versions import StrategyVersionStore
+
+            prepared = _prepare_python_upload(request, worker_image=image)
+            sandbox = PythonSandbox(image)  # Validate immutable image identity before consuming the token.
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not _consume_preview_token(request.preview_token, prepared["review_hash"]):
+            raise HTTPException(status_code=409, detail="Python upload inputs changed or the preview token expired")
+
+        now = datetime.now(timezone.utc)
+        run_id = f"btpy_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}"
+        runs_dir = _host_RUNS_DIR()
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = runs_dir / run_id
+        run_dir.mkdir()
+        imported = prepared["imported"]
+        metadata = prepared["metadata"]
+        from src.bt_runtime.report_artifact_integrity import SCHEMA_VERSION as REPORT_INTEGRITY_SCHEMA
+
+        (run_dir / "config.json").write_text(json.dumps({
+            "execution_backend": "backtrader",
+            "execution_mode": "backtest",
+            "source_kind": "python_upload",
+            "codes": [request.instrument_id],
+            "instrument_id": request.instrument_id,
+            "strategy_id": request.strategy_id,
+            "start_date": imported.manifest.range_start.isoformat(),
+            "end_date": imported.manifest.range_end.isoformat(),
+            "source": metadata.provider,
+            "data_authenticity": "caller_declared_unverified",
+            "preview_review_hash": prepared["review_hash"],
+            "worker_image": prepared["worker_image"],
+            "initial_cash": request.initial_cash,
+            "commission_rate": request.commission_rate,
+            "slippage_fraction": request.slippage_fraction,
+            "execution_report_integrity_schema": REPORT_INTEGRITY_SCHEMA,
+        }, sort_keys=True), encoding="utf-8")
+        (run_dir / "req.json").write_text(json.dumps({
+            "prompt": f"Python upload backtest: {request.strategy_id} ({request.instrument_id})",
+            "context": {
+                "source_kind": "python_upload", "instrument_id": request.instrument_id,
+                "codes": [request.instrument_id],
+                "start_date": imported.manifest.range_start.isoformat(),
+                "end_date": imported.manifest.range_end.isoformat(),
+            },
+        }, sort_keys=True), encoding="utf-8")
+        (run_dir / "state.json").write_text(json.dumps({"status": "running", "created_at": now.isoformat()}), encoding="utf-8")
+        try:
+            from backtrader import __version__ as backtrader_version
+            from src.execution.event_worker import PYTHON_WORKER_COMPILER_VERSION
+            from src.execution.contracts import canonical_sha256
+
+            config_path = run_dir / "config.json"
+            run_config = json.loads(config_path.read_text(encoding="utf-8"))
+            run_config.update({
+                "data_manifest_hash": canonical_sha256(imported.manifest),
+                "market_data_file_sha256": imported.raw_sha256,
+                "strategy_spec_hash": prepared["spec_hash"],
+                "strategy_source_sha256": prepared["source_sha256"],
+            })
+            config_path.write_text(json.dumps(run_config, sort_keys=True), encoding="utf-8")
+            versions = StrategyVersionStore(run_dir.parent.parent / "strategy-versions")
+            version = versions.create_version(
+                prepared["spec"],
+                engine_version=f"backtrader/{backtrader_version}",
+                compiler_version=PYTHON_WORKER_COMPILER_VERSION,
+                upload_source=prepared["source_bytes"],
+            )
+            report = await run_in_threadpool(
+                run_python_upload_service,
+                version_id=version.version_id,
+                versions=versions,
+                market_data=imported,
+                raw_csv=prepared["raw_csv"],
+                sandbox=sandbox,
+                run_dir=run_dir,
+                initial_cash=request.initial_cash,
+                commission_rate=request.commission_rate,
+                slippage_fraction=request.slippage_fraction,
+                run_id=run_id,
+                resume_context={
+                    "market_data_metadata": metadata.model_dump(mode="json"),
+                    "expected_sessions": [session.model_dump(mode="json") for session in request.expected_sessions],
+                },
+                worker_image=prepared["worker_image"],
+            )
+            from src.bt_runtime.report_artifact_integrity import write_report_integrity_sidecar
+
+            write_report_integrity_sidecar(run_dir / "artifacts" / "execution_report.json")
+        except (ValueError, TypeError) as exc:
+            (run_dir / "state.json").write_text(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False), encoding="utf-8")
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            safe_failure = _public_python_strategy_failure(exc)
+            if safe_failure is not None:
+                (run_dir / "state.json").write_text(
+                    json.dumps(safe_failure, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+                )
+                raise HTTPException(status_code=422, detail=safe_failure["message"]) from exc
+            (run_dir / "state.json").write_text(json.dumps({"status": "failed", "error": type(exc).__name__}), encoding="utf-8")
+            raise HTTPException(status_code=502, detail=f"Isolated Backtrader run failed: {type(exc).__name__}") from exc
+        (run_dir / "state.json").write_text(json.dumps({"status": "success", "created_at": now.isoformat()}), encoding="utf-8")
+        return {"run_id": run_id, "status": "success", "execution_report": report}
+
+    @app.post("/runs/{run_id}/resume", dependencies=[Depends(require_auth)])
+    async def resume_python_upload_backtest(run_id: str):
+        """Resume a failed Python upload backtest from its durable event journal."""
+        _host_validate_path_param(run_id, "run_id")
+        run_dir = _host_RUNS_DIR() / run_id
+        if not run_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Backtest run not found")
+        config_path = run_dir / "config.json"
+        state_path = run_dir / "state.json"
+        if not config_path.exists() or not state_path.exists():
+            raise HTTPException(status_code=409, detail="Run metadata is incomplete and cannot be resumed")
+        run_config = json.loads(config_path.read_text(encoding="utf-8"))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not (
+            run_config.get("execution_backend") == "backtrader"
+            and run_config.get("execution_mode") == "backtest"
+            and run_config.get("source_kind") == "python_upload"
+        ):
+            raise HTTPException(status_code=409, detail="Only Python upload Backtrader backtests can be resumed")
+        if state.get("status") not in {"running", "failed"}:
+            raise HTTPException(status_code=409, detail="Only incomplete backtest runs can be resumed")
+        image = os.environ.get("VIBE_PYTHON_WORKER_IMAGE", "").strip()
+        if not image:
+            raise HTTPException(status_code=503, detail="Python strategy worker image is not configured")
+        try:
+            from src.bt_runtime.strategies.python_upload_service import (
+                load_python_upload_resume_inputs,
+                run_python_upload_service,
+            )
+            from src.bt_runtime.backtest_event_journal import BacktestJournalError
+            from src.execution.python_sandbox import PythonSandbox
+            from src.execution.strategy_source_policy import StrategySourcePolicyError, validate_strategy_source
+            from src.execution.versions import StrategyVersionStore
+
+            saved = load_python_upload_resume_inputs(run_dir)
+            if run_config.get("worker_image") != image:
+                raise HTTPException(status_code=409, detail="configured Python worker image differs from the frozen run")
+            sandbox = PythonSandbox(image)
+            versions = StrategyVersionStore(run_dir.parent.parent / "strategy-versions")
+            version = versions.get_version(saved["version_id"])
+            try:
+                source_text = versions.read_upload_source(version.version_id).decode("utf-8", errors="strict")
+                validate_strategy_source(source_text)
+            except (UnicodeDecodeError, StrategySourcePolicyError) as exc:
+                raise ValueError("frozen strategy source is outside the supported upload policy") from exc
+            if (
+                version.version_hash != saved["strategy_version_hash"]
+                or version.spec_hash != saved["strategy_spec_hash"]
+            ):
+                raise ValueError("frozen strategy version does not match the persisted backtest run")
+            state_path.write_text(json.dumps({"status": "running", "resumed_at": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
+            report = await run_in_threadpool(
+                run_python_upload_service,
+                version_id=version.version_id,
+                versions=versions,
+                market_data=saved["market_data"],
+                raw_csv=saved["raw_csv"],
+                sandbox=sandbox,
+                run_dir=run_dir,
+                run_id=run_id,
+                initial_cash=saved["initial_cash"],
+                commission_rate=saved["commission_rate"],
+                slippage_fraction=saved["slippage_fraction"],
+                resume_context=saved["resume_context"],
+                worker_image=image,
+            )
+        except HTTPException:
+            raise
+        except BacktestJournalError as exc:
+            state_path.write_text(json.dumps({"status": "paused", "error": str(exc)}, ensure_ascii=False), encoding="utf-8")
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, TypeError) as exc:
+            state_path.write_text(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False), encoding="utf-8")
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            safe_failure = _public_python_strategy_failure(exc)
+            if safe_failure is not None:
+                state_path.write_text(
+                    json.dumps(safe_failure, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+                )
+                raise HTTPException(status_code=422, detail=safe_failure["message"]) from exc
+            state_path.write_text(json.dumps({"status": "failed", "error": type(exc).__name__}), encoding="utf-8")
+            raise HTTPException(status_code=502, detail=f"Backtest recovery failed: {type(exc).__name__}") from exc
+        state_path.write_text(json.dumps({"status": "success", "resumed_at": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
+        return {"run_id": run_id, "status": "success", "execution_report": report}
 
     @app.get("/runs/{run_id}/code", dependencies=[Depends(require_auth)])
     async def get_run_code(run_id: str):
@@ -973,6 +2363,17 @@ def register_runs_routes(
             chart_payload=chart_payload or "full",
             chart_symbols_out=chart_symbols if wants_chart_meta else None,
         )
+
+        integrity = response.execution_report_integrity or {}
+        if integrity.get("status") == "invalid":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "execution_report_integrity_failed",
+                    "status": "invalid",
+                    "error": integrity.get("error", "execution report integrity validation failed"),
+                },
+            )
 
         if wants_chart_meta:
             payload = _run_response_payload(response)

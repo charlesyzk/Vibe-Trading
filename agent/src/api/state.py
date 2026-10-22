@@ -19,6 +19,8 @@ _session_service = None
 _channel_runtime = None
 _channel_bus = None
 _channel_manager = None
+_paper_execution_manager = None
+_paper_execution_readiness = None
 
 
 # ============================================================================
@@ -69,6 +71,156 @@ def _get_session_service():
     _set_host_attr("_session_service", _session_service)
     _attach_delivery_listener(event_bus)
     return _session_service
+
+
+def _get_paper_execution_manager(app=None):
+    """Return an inert, fail-closed manager until a trusted factory is wired.
+
+    Construction has no broker side effects. The default manager has no runtime
+    factory and denies all control grants; this helper is only for status and
+    future explicitly configured lifecycle integration.
+    """
+    global _paper_execution_manager
+
+    if app is not None:
+        app_manager = getattr(app.state, "paper_execution_manager", None)
+        if app_manager is not None:
+            return app_manager
+        from src.execution.paper_execution_manager import PaperExecutionManager
+
+        app_manager = PaperExecutionManager(runtime_factory=None)
+        app.state.paper_execution_manager = app_manager
+        return app_manager
+
+    import sys as _sys
+    _host = _sys.modules.get("api_server")
+    if _host is not None and hasattr(_host, "_paper_execution_manager"):
+        host_val = getattr(_host, "_paper_execution_manager")
+        if host_val is not None:
+            return host_val
+    elif _paper_execution_manager is not None:
+        return _paper_execution_manager
+
+    from src.execution.paper_execution_manager import PaperExecutionManager
+
+    _paper_execution_manager = PaperExecutionManager(runtime_factory=None)
+    _set_host_attr("_paper_execution_manager", _paper_execution_manager)
+    return _paper_execution_manager
+
+
+def _get_paper_execution_readiness(app=None):
+    """Return the explicitly installed app-composition readiness declaration.
+
+    The default is intentionally incomplete. Registering a bare runtime
+    factory does not imply that strategy, authorization, data, or risk
+    collaborators are available.
+    """
+    global _paper_execution_readiness
+
+    if app is not None:
+        app_readiness = getattr(app.state, "paper_execution_readiness", None)
+        if app_readiness is not None:
+            return app_readiness
+        # If a trusted manager was installed directly on this app, its bound
+        # readiness is the startup gate and therefore the safest default for
+        # status as well. The normal composition setter stores both values;
+        # this fallback keeps an omitted app.state alias from appearing as a
+        # different (all-missing) readiness declaration.
+        app_manager = getattr(app.state, "paper_execution_manager", None)
+        manager_readiness = getattr(app_manager, "startup_readiness", None)
+        from src.execution.paper_execution_readiness import PaperExecutionReadiness
+
+        if isinstance(manager_readiness, PaperExecutionReadiness):
+            app.state.paper_execution_readiness = manager_readiness
+            return manager_readiness
+        app_readiness = PaperExecutionReadiness()
+        app.state.paper_execution_readiness = app_readiness
+        return app_readiness
+
+    import sys as _sys
+    _host = _sys.modules.get("api_server")
+    if _host is not None and hasattr(_host, "_paper_execution_readiness"):
+        host_val = getattr(_host, "_paper_execution_readiness")
+        if host_val is not None:
+            return host_val
+    elif _paper_execution_readiness is not None:
+        return _paper_execution_readiness
+
+    from src.execution.paper_execution_readiness import PaperExecutionReadiness
+
+    _paper_execution_readiness = PaperExecutionReadiness()
+    _set_host_attr("_paper_execution_readiness", _paper_execution_readiness)
+    return _paper_execution_readiness
+
+
+def _set_paper_execution_composition(manager, readiness, *, app=None, scope=None) -> None:
+    """Install an explicit manager/readiness pair from a trusted app root.
+
+    This setter does not start the runtime. The caller must build and validate
+    the concrete collaborators before registering them.
+    """
+    from src.execution.paper_execution_manager import (
+        PaperExecutionManager,
+        PaperRuntimeConflict,
+        PaperRuntimeScope,
+    )
+    from src.execution.paper_execution_readiness import PaperExecutionReadiness
+
+    if not isinstance(manager, PaperExecutionManager):
+        raise TypeError("manager must be a PaperExecutionManager")
+    if not isinstance(readiness, PaperExecutionReadiness):
+        raise TypeError("readiness must be a PaperExecutionReadiness")
+    if scope is not None and not isinstance(scope, PaperRuntimeScope):
+        raise TypeError("scope must be a trusted PaperRuntimeScope or None")
+
+    if app is not None:
+        current_manager = getattr(app.state, "paper_execution_manager", None)
+        current_readiness = getattr(app.state, "paper_execution_readiness", None)
+        current_scope = getattr(app.state, "paper_execution_scope", None)
+
+        # Re-registering the exact pair is harmless, including while it owns
+        # a runtime. Replacing an active manager would orphan its runtime from
+        # the app lifespan, which only shuts down the currently registered
+        # manager.
+        if current_manager is manager and current_readiness is readiness:
+            if scope is not None:
+                active_status = manager.status()
+                if (
+                    active_status is not None
+                    and (
+                        active_status.scope != scope
+                        or (current_scope is not None and current_scope != scope)
+                    )
+                ):
+                    raise PaperRuntimeConflict(
+                        "cannot replace PAPER scope while the app manager has an active runtime"
+                    )
+                app.state.paper_execution_scope = scope
+            return
+        if current_manager is not None and current_manager.status() is not None:
+            raise PaperRuntimeConflict(
+                "cannot replace PAPER composition while the app manager has an active runtime"
+            )
+
+    # The same immutable readiness instance drives both status reporting and
+    # the manager's pre-factory startup gate. Do not let these sources drift.
+    manager.bind_startup_readiness(readiness)
+
+    if app is not None:
+        app.state.paper_execution_manager = manager
+        app.state.paper_execution_readiness = readiness
+        if scope is None:
+            if hasattr(app.state, "paper_execution_scope"):
+                delattr(app.state, "paper_execution_scope")
+        else:
+            app.state.paper_execution_scope = scope
+        return
+
+    global _paper_execution_manager, _paper_execution_readiness
+    _paper_execution_manager = manager
+    _paper_execution_readiness = readiness
+    _set_host_attr("_paper_execution_manager", manager)
+    _set_host_attr("_paper_execution_readiness", readiness)
 
 
 #: Terminal attempt events a finished scheduled briefing can follow.

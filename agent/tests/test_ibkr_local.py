@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import types
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -411,6 +412,29 @@ def test_historical_bars_select_tier_too(monkeypatch: pytest.MonkeyPatch) -> Non
     local.get_historical_bars("AAPL", config=local.IBKRLocalConfig(profile="paper"))
 
     assert calls == ["tier:3", "history"], calls
+
+
+def test_historical_bars_formats_explicit_end_date_in_new_york(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class _DateIB(_FakeIB):
+        def reqMarketDataType(self, tier):
+            return None
+
+        def reqHistoricalData(self, contract, **kwargs):
+            captured.update(kwargs)
+            return [SimpleNamespace(date="20261022", open=1, high=2, low=0.5, close=1.5, volume=100)]
+
+    _install_fake_ib(monkeypatch, _DateIB)
+    local.get_historical_bars(
+        "AAPL", config=local.IBKRLocalConfig(profile="live-readonly"),
+        end_date=date(2026, 10, 22),
+    )
+
+    assert captured["endDateTime"] == "20261022 23:59:59 US/Eastern"
+    assert captured["barSizeSetting"] == "1 day"
+    assert captured["whatToShow"] == "TRADES"
+    assert captured["useRTH"] is True
 
 
 def test_starved_ticker_reports_no_data_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:

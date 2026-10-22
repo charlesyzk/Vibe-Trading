@@ -1,0 +1,18 @@
+[project]
+name = "vibe-trading-ibkr-runtime"
+version = "0.1.0"
+description = "Isolated runtime for the official IBKR TWS Python API"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "protobuf==5.29.5",
+    "setuptools==80.9.0",
+    "wheel==0.45.1",
+]
+
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ibkr_runtime*"]

@@ -9,13 +9,20 @@ Usage: ``python -m backtest.runner <run_dir>``
 """
 
 import ast
+import csv
 import copy
+import hashlib
 import importlib.util
 import inspect
+import io
 import json
 import logging
+import os
 import sys
+import tempfile
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional
 
@@ -57,6 +64,7 @@ logger = logging.getLogger(__name__)
 
 _VALID_INTERVALS = {"1m", "5m", "15m", "30m", "1H", "4H", "1D", "1W", "1M"}
 _VALID_ENGINES = {"daily", "options"}
+_VALID_EXECUTION_BACKENDS = {"legacy", "backtrader"}
 _PRICE_PANEL_COLUMNS = ("open", "high", "low", "close", "volume", "vwap", "amount")
 _FUND_PREFIX = "fund:"
 
@@ -86,6 +94,15 @@ class BacktestConfigSchema(BaseModel):
     source: str = "tushare"
     interval: str = "1D"
     engine: str = "daily"
+    # Selects the implementation family independently of the legacy
+    # ``engine`` selector, whose daily/options meaning must remain stable.
+    execution_backend: Literal["legacy", "backtrader"] = "legacy"
+    strategy_spec: Optional[Dict[str, Any]] = None
+    instrument_id: Optional[str] = None
+    strategy_budget: float = Field(default=40_000, gt=0, allow_inf_nan=False)
+    fee_reserve: float = Field(default=25, ge=0, allow_inf_nan=False)
+    price_buffer_fraction: float = Field(default=0.01, ge=0, allow_inf_nan=False)
+    commission_rate: float = Field(default=0.001, ge=0, allow_inf_nan=False)
     position_adjustment: Literal["hold", "rebalance"] = "hold"
     rebalance_mask: RebalanceMask = None
     # Under "rebalance", a resize executes only once the held weight has
@@ -169,6 +186,15 @@ class BacktestConfigSchema(BaseModel):
             raise ValueError(f"unsupported source {v!r}, must be one of {VALID_SOURCES}")
         return v
 
+    @field_validator("execution_backend")
+    @classmethod
+    def valid_execution_backend(cls, value: str) -> str:
+        if value not in _VALID_EXECUTION_BACKENDS:
+            raise ValueError(
+                f"unsupported execution_backend {value!r}, must be one of {_VALID_EXECUTION_BACKENDS}"
+            )
+        return value
+
     @field_validator("fundamental_fields")
     @classmethod
     def valid_fundamental_fields(
@@ -209,6 +235,17 @@ class BacktestConfigSchema(BaseModel):
             raise ValueError(
                 f"start_date ({self.start_date}) must be <= end_date ({self.end_date})"
             )
+        if self.execution_backend == "backtrader":
+            if self.strategy_spec is None:
+                raise ValueError("execution_backend='backtrader' requires strategy_spec")
+            if self.engine != "daily":
+                raise ValueError("Backtrader execution currently supports engine='daily' only")
+            if self.interval != "1D":
+                raise ValueError("Backtrader execution supports interval='1D' only")
+            if not self.instrument_id:
+                raise ValueError("Backtrader execution requires an explicit instrument_id")
+        elif self.strategy_spec is not None:
+            raise ValueError("strategy_spec requires execution_backend='backtrader'")
         return self
 
 
@@ -1245,6 +1282,17 @@ def main(run_dir: Path) -> None:
     source = config.get("source", "tushare")
     codes = config.get("codes", [])
 
+    # Backtrader strategies use a strict frozen StrategySpec and the trusted
+    # runtime compiler. This branch intentionally runs before the legacy
+    # ``signal_engine.py`` requirement and never imports user Python source.
+    if config.get("execution_backend", "legacy") == "backtrader":
+        try:
+            run_backtrader_backend(config, run_dir)
+        except Exception as exc:
+            print(json.dumps({"error": f"Backtrader execution failed: {exc}"}, ensure_ascii=False))
+            sys.exit(1)
+        return
+
     # Load signal engine
     signal_path = run_dir / "code" / "signal_engine.py"
     if not signal_path.exists():
@@ -1315,6 +1363,401 @@ def main(run_dir: Path) -> None:
     else:
         market_engine = _create_market_engine(effective_source, config, codes)
         market_engine.run_backtest(config, loader, signal_engine, run_dir, bars_per_year=bars_per_year)
+
+
+def fetch_exact_yfinance_daily(symbol: str, start: date, end: date) -> Any:
+    """Fetch through the concrete YFinance loader without source-registry fallback."""
+    from src.execution.yfinance_daily_provider import YFinanceDailyProvider
+
+    return YFinanceDailyProvider().history(symbol, start, end)
+
+
+def fetch_exact_ibkr_daily(
+    symbol: str, start: date, end: date, *, instrument_id: str, profile_id: str,
+    port: int | None = None,
+) -> Any:
+    """Fetch from the user's explicitly selected local IBKR read-only profile."""
+    from src.execution.ibkr_daily_provider import IbkrDailyProvider
+
+    return IbkrDailyProvider().history(
+        symbol, start, end, instrument_id=instrument_id, profile_id=profile_id,
+        **({"port": port} if port is not None else {}),
+    )
+
+
+def prepare_trusted_provider_market_snapshot(
+    config: dict[str, Any], spec: Any,
+) -> dict[str, Any]:
+    """Fetch, strictly import, and serialize the exact bars for a reviewed run.
+
+    The snapshot is caller-declared provider data, not authenticated market
+    data. Its purpose is to bind preview and execution to the same immutable
+    bytes and calendar schedule.
+    """
+    from src.bt_runtime.calendars import CALENDAR_ID, CALENDAR_TIMEZONE, build_xnys_schedule
+    from src.bt_runtime.market_data import MarketDataMetadata, import_completed_daily_csv
+    from src.bt_runtime.strategies import sma as sma_runtime
+    from src.execution.contracts import canonical_sha256
+
+    requested_source = str(config.get("source") or "yfinance")
+    provider_provenance: dict[str, Any] | None = None
+    if requested_source in {"yfinance", "ibkr"}:
+        # Bounded trusted-template runs must not silently resolve a requested
+        # provider through the broad legacy fallback registry.
+        source_codes = list(config.get("codes") or [])
+        if len(source_codes) != 1:
+            raise ValueError("Backtrader execution requires exactly one market symbol")
+        symbol = str(source_codes[0])
+        start = datetime.strptime(str(config["start_date"]), "%Y-%m-%d").date()
+        end = datetime.strptime(str(config["end_date"]), "%Y-%m-%d").date()
+        if requested_source == "ibkr":
+            fetched = fetch_exact_ibkr_daily(
+                symbol, start, end,
+                instrument_id=str(config.get("instrument_id") or ""),
+                profile_id=str(config.get("ibkr_profile_id") or ""),
+                **({"port": int(config["ibkr_port"])} if config.get("ibkr_port") is not None else {}),
+            )
+        else:
+            fetched = fetch_exact_yfinance_daily(symbol, start, end)
+        data_map = {fetched.symbol: fetched.frame}
+        effective_sources = [str(fetched.provenance["requested_provider"])]
+        provider_provenance = fetched.provenance
+    else:
+        fetch_result = fetch_data_map(config)
+        if len(fetch_result.codes) != 1 or len(fetch_result.data_map) != 1:
+            raise ValueError("Backtrader execution requires exactly one imported instrument series")
+        symbol = fetch_result.codes[0]
+        data_map = fetch_result.data_map
+        effective_sources = fetch_result.effective_sources or [fetch_result.source]
+    if len(data_map) != 1:
+        raise ValueError("Backtrader execution requires exactly one imported instrument series")
+    imported_frame = data_map.get(symbol)
+    if imported_frame is None:
+        raise ValueError("market data provider returned no bars for the selected symbol")
+    columns = ["open", "high", "low", "close", "volume"]
+    missing = [column for column in columns if column not in imported_frame.columns]
+    if missing:
+        raise ValueError(f"provider bars are missing required OHLCV fields: {missing}")
+    bars = imported_frame.loc[:, columns].copy()
+    try:
+        provider_index = pd.DatetimeIndex(pd.to_datetime(bars.index))
+        wall_index = provider_index.tz_localize(None) if provider_index.tz is not None else provider_index
+        session_dates = [stamp.date() for stamp in wall_index]
+        index = pd.DatetimeIndex([
+            pd.Timestamp(session_day).tz_localize(spec.bar_policy.timezone)
+            for session_day in session_dates
+        ])
+    except Exception as exc:
+        raise ValueError("provider bars require a valid daily DatetimeIndex") from exc
+    if any(stamp.time() != datetime.min.time() for stamp in wall_index):
+        raise ValueError("daily provider indexes must use midnight session-date labels")
+    bars.index = index
+    bars = sma_runtime._validate_bars(bars)
+
+    compiled = sma_runtime.compile_strategy(spec)
+    if len(bars) < compiled.warmup_bars:
+        raise ValueError("provider returned too few complete daily bars for trusted-template warmup")
+
+    local_dates = [stamp.date() for stamp in bars.index]
+    if len(set(local_dates)) != len(local_dates):
+        raise ValueError("provider bars contain multiple rows for one local session date")
+    if spec.bar_policy.calendar_id not in {CALENDAR_ID, "us_equity_rth"}:
+        raise ValueError(f"unsupported trusted template calendar {spec.bar_policy.calendar_id!r}")
+    try:
+        requested_start = datetime.strptime(str(config["start_date"]), "%Y-%m-%d").date()
+        requested_end = datetime.strptime(str(config["end_date"]), "%Y-%m-%d").date()
+    except (KeyError, ValueError) as exc:
+        raise ValueError("Backtrader provider runs require inclusive YYYY-MM-DD start_date/end_date") from exc
+    if requested_end < requested_start:
+        raise ValueError("end_date must be on or after start_date")
+    schedule = build_xnys_schedule(requested_start, requested_end)
+    calendar_dates = [session.session_date for session in schedule.sessions]
+    if local_dates != calendar_dates:
+        missing_dates = sorted(set(calendar_dates) - set(local_dates))
+        unexpected = sorted(set(local_dates) - set(calendar_dates))
+        raise ValueError(
+            f"provider sessions do not match pinned XNYS calendar; missing={missing_dates[:5]}, "
+            f"unexpected={unexpected[:5]}"
+        )
+
+    csv_buffer = io.StringIO(newline="")
+    writer = csv.writer(csv_buffer, lineterminator="\n")
+    writer.writerow(("session_date", "start_at", "end_at", "available_at", *columns))
+    sessions: list[dict[str, Any]] = []
+    for session, (_, row) in zip(schedule.sessions, bars.iterrows(), strict=True):
+        writer.writerow((
+            session.session_date.isoformat(), session.open_at.isoformat(), session.close_at.isoformat(),
+            session.close_at.isoformat(), *(format(float(row[column]), ".10f") for column in columns),
+        ))
+        sessions.append({
+            "session_date": session.session_date.isoformat(),
+            "open_at": session.open_at.isoformat(),
+            "close_at": session.close_at.isoformat(),
+            "early_close": session.early_close,
+        })
+    csv_bytes = csv_buffer.getvalue().encode("utf-8")
+    from src.bt_runtime.market_data import canonical_daily_bars_sha256
+
+    provider_provenance = dict(provider_provenance or {
+        "schema": "host-observed-provider-fetch/1",
+        "requested_provider": requested_source,
+        "actual_loader_identity": ",".join(sorted(set(effective_sources))),
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "identity_authentication": "UNVERIFIED",
+        "point_in_time_availability": "UNVERIFIED",
+        "adjustment_semantics": "UNVERIFIED",
+        "broker_contract_mapping": "UNVERIFIED",
+    })
+    provider_provenance["normalized_ohlcv_sha256"] = canonical_daily_bars_sha256(bars)
+    provider_provenance["snapshot_csv_sha256"] = hashlib.sha256(csv_bytes).hexdigest()
+    retrieval_time = datetime.fromisoformat(provider_provenance["retrieved_at"])
+    download_parameters = {
+        "source": requested_source,
+        "symbols": [symbol],
+        "interval": "1D",
+        "requested_start_date": config["start_date"],
+        "requested_end_date": config["end_date"],
+        "calendar_schedule_sha256": schedule.sha256,
+        "host_observed_provider_fetch": provider_provenance,
+    }
+    metadata = MarketDataMetadata(
+        provider=",".join(sorted(set(effective_sources))),
+        instrument_id=spec.instrument_ids[0], currency="USD", timezone=CALENDAR_TIMEZONE,
+        calendar_id=schedule.calendar_id, calendar_version=schedule.calendar_version,
+        calendar_schedule_sha256=schedule.sha256,
+        availability_model="completed daily bars indexed at XNYS close; provider publication time unverified",
+        adjustment_policy="provider_default_unverified", corporate_action_policy="provider_default_unverified",
+        fetched_at=retrieval_time, warmup_start=local_dates[0],
+        warmup_end=local_dates[compiled.evaluation_start_index - 1],
+        evaluation_start=local_dates[compiled.evaluation_start_index], evaluation_end=local_dates[-1],
+        download_parameters=download_parameters,
+    )
+    verified_data = import_completed_daily_csv(csv_bytes, metadata, schedule.sessions)
+    manifest = verified_data.manifest.model_copy(update={
+        "quality_report": {
+            **verified_data.manifest.quality_report,
+            "source_claims_authenticated": False,
+            "point_in_time_availability_verified": False,
+            "symbol_to_instrument_mapping_verified": False,
+            "limitations": [
+                "provider metadata does not prove historical point-in-time availability or publication delay",
+                "configured instrument_id is caller-supplied and is not a broker contract verification",
+                "provider default corporate-action and adjustment policies are unverified",
+            ],
+        }
+    })
+    return {
+        "market_data_csv": csv_bytes.decode("utf-8"),
+        "metadata": metadata.model_dump(mode="json"),
+        "expected_sessions": sessions,
+        "manifest_sha256": canonical_sha256(manifest),
+        "data_sha256": verified_data.raw_sha256,
+        "bar_count": len(verified_data.bar_records),
+        "provider": metadata.provider,
+    }
+
+
+def run_backtrader_backend(
+    config: dict[str, Any], run_dir: Path, frozen_market_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the trusted Backtrader template on one frozen daily series.
+
+    This adapter accepts only allowlisted natural-language templates.
+    Uploaded Python cannot use this path until the isolated strategy worker and
+    event-by-event data release contract are available.
+    """
+    from src.bt_runtime.calendars import CALENDAR_TIMEZONE
+    from src.bt_runtime.market_data import MarketDataMetadata, import_completed_daily_csv
+    from src.bt_runtime.report_replay import (
+        replay_backtrader_order_log_subprocess,
+        verify_backtest_report_replay,
+        verify_trusted_template_sizing_metadata,
+    )
+    from src.bt_runtime.strategies import sma as sma_runtime
+    from src.bt_runtime.strategies.sma import compile_strategy, run_verified_backtest
+    from src.execution.contracts import SourceKind, StrategySpec, canonical_json, canonical_sha256
+    from src.execution.versions import StrategyVersionStore
+
+    spec = StrategySpec.model_validate(config["strategy_spec"])
+    if frozen_market_data is None:
+        frozen_market_data = config.pop("_frozen_market_data", None)
+    if config.get("expected_strategy_source_hash") != sma_runtime.TRUSTED_TEMPLATE_SOURCE_SHA256:
+        raise ValueError("trusted template source changed after strategy preview")
+    if config.get("expected_compiler_version") != sma_runtime.TRUSTED_TEMPLATE_COMPILER_VERSION:
+        raise ValueError("trusted template compiler changed after strategy preview")
+    if spec.source_kind is not SourceKind.NATURAL_LANGUAGE_TEMPLATE:
+        raise ValueError("Python uploads are disabled until isolated worker execution is available")
+    if spec.bar_policy.timezone != CALENDAR_TIMEZONE:
+        raise ValueError(f"trusted XNYS runs require timezone {CALENDAR_TIMEZONE!r}")
+    compile_strategy(spec)  # Fail unsupported templates before fetching market data.
+    if config.get("instrument_id") != spec.instrument_ids[0]:
+        raise ValueError("config instrument_id must match StrategySpec.instrument_ids[0]")
+    if len(config.get("codes") or []) != 1:
+        raise ValueError("Backtrader execution requires exactly one market symbol")
+
+    if frozen_market_data is None:
+        frozen_market_data = prepare_trusted_provider_market_snapshot(config, spec)
+    from src.bt_runtime.market_data import MarketSession
+
+    raw_csv = frozen_market_data.get("market_data_csv")
+    if not isinstance(raw_csv, str):
+        raise ValueError("frozen market snapshot is missing its CSV bytes")
+    metadata = MarketDataMetadata.model_validate(frozen_market_data.get("metadata"))
+    sessions = [MarketSession(
+        session_date=date.fromisoformat(item["session_date"]),
+        open_at=datetime.fromisoformat(item["open_at"]),
+        close_at=datetime.fromisoformat(item["close_at"]),
+        early_close=item["early_close"],
+    ) for item in frozen_market_data.get("expected_sessions", [])]
+    csv_bytes = raw_csv.encode("utf-8")
+    verified_data = import_completed_daily_csv(csv_bytes, metadata, sessions)
+    from src.execution.contracts import canonical_sha256
+
+    manifest = verified_data.manifest.model_copy(update={
+        "quality_report": {
+            **verified_data.manifest.quality_report,
+            "source_claims_authenticated": False,
+            "point_in_time_availability_verified": False,
+            "symbol_to_instrument_mapping_verified": False,
+            "limitations": [
+                "provider metadata does not prove historical point-in-time availability or publication delay",
+                "configured instrument_id is caller-supplied and is not a broker contract verification",
+                "provider default corporate-action and adjustment policies are unverified",
+            ],
+        }
+    })
+    expected_manifest_hash = frozen_market_data.get("manifest_sha256")
+    if expected_manifest_hash and canonical_sha256(manifest) != expected_manifest_hash:
+        raise ValueError("frozen market snapshot manifest hash does not match its data")
+    expected_data_hash = frozen_market_data.get("data_sha256")
+    if expected_data_hash and verified_data.raw_sha256 != expected_data_hash:
+        raise ValueError("frozen market snapshot data hash does not match its preview")
+    bars = verified_data.bars
+    symbol = config["codes"][0]
+
+    report = run_verified_backtest(
+        spec,
+        bars,
+        manifest,
+        strategy_budget=Decimal(str(config.get("strategy_budget", 40_000))),
+        fee_reserve=Decimal(str(config.get("fee_reserve", 25))),
+        price_buffer_fraction=Decimal(str(config.get("price_buffer_fraction", 0.01))),
+        initial_cash=float(config.get("initial_cash", 1_000_000)),
+        commission_rate=float(config.get("commission_rate", 0.001)),
+        slippage_fraction=float(config.get("slippage_fraction", 0.0)),
+    ).to_dict()
+
+    # Version the exact trusted compiler source and frozen spec. The app-level
+    # store is shared across runs under the runtime root, while the run report
+    # retains a self-contained record reference for API consumers.
+    import backtrader
+
+    version_store = StrategyVersionStore(run_dir.parent.parent / "strategy-versions")
+    version = version_store.create_version(
+        spec,
+        template_source=sma_runtime.TRUSTED_TEMPLATE_SOURCE,
+        # Persist a machine contract shared with the PAPER composition
+        # validators. The report's friendlier engine label is display-only.
+        engine_version=f"backtrader/{backtrader.__version__}",
+        compiler_version=sma_runtime.TRUSTED_TEMPLATE_COMPILER_VERSION,
+    )
+    report.update(
+        {
+            "execution_backend": "backtrader",
+            "execution_mode": "backtest",
+            "strategy_version_id": version.version_id,
+            "strategy_version_hash": version.version_hash,
+            "strategy_spec_hash": version.spec_hash,
+            "symbol": symbol,
+            "mode": "provider_import_with_pinned_xnys_schedule_unverified_provider",
+        }
+    )
+    # Replay the captured trusted-template decisions in a fresh BackBroker
+    # process. This verifies execution/accounting fields; the template signal
+    # calculation remains evidenced by its frozen source and is not replayed.
+    session_sequence = {
+        bar.session_date.isoformat(): index
+        for index, bar in enumerate(verified_data.bar_records, start=1)
+    }
+    report["decision_log"] = [
+        {
+            "seq": session_sequence[row["decision_date"]],
+            "session_date": row["decision_date"],
+            "side": row["side"],
+            "requested_qty": row["requested_qty"],
+            "reason": row.get("sizing_reason"),
+        }
+        for row in report["orders"]
+    ]
+    report["provenance"]["strategy_version_hash"] = version.version_hash
+    manifest_hash = canonical_sha256(manifest)
+    initial_cash = float(config.get("initial_cash", 1_000_000))
+    commission_rate = float(config.get("commission_rate", 0.001))
+    slippage_fraction = float(config.get("slippage_fraction", 0.0))
+    replay = replay_backtrader_order_log_subprocess(
+        verified_data.bars,
+        verified_data.bar_records,
+        report["decision_log"],
+        initial_cash=initial_cash,
+        commission_rate=commission_rate,
+        slippage_fraction=slippage_fraction,
+        evaluation_start=manifest.evaluation_start,
+        data_manifest_hash=manifest_hash,
+        instrument_id=spec.instrument_ids[0],
+    )
+    report["execution_integrity"] = verify_backtest_report_replay(
+        report,
+        replay,
+        initial_cash=initial_cash,
+        commission_rate=commission_rate,
+        slippage_fraction=slippage_fraction,
+        data_manifest_hash=manifest_hash,
+        strategy_version_hash=version.version_hash,
+        engine=report["engine"],
+        instrument_id=spec.instrument_ids[0],
+        strict_order_shape=True,
+    )
+    verify_trusted_template_sizing_metadata(
+        report,
+        replay,
+        allocation_fraction=spec.position_policy.allocation_fraction,
+        strategy_budget=Decimal(str(config.get("strategy_budget", 40_000))),
+        fee_reserve=Decimal(str(config.get("fee_reserve", 25))),
+        price_buffer_fraction=Decimal(str(config.get("price_buffer_fraction", 0.01))),
+    )
+    report["execution_integrity"]["checked_fields"].append("trusted_template_sizing_metadata")
+    artifacts = run_dir / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    # Freeze the exact normalized provider bars used by Cerebro so the
+    # manifest's file hash can be independently checked after the run.
+    (artifacts / "market_data.csv").write_bytes(csv_bytes)
+    (artifacts / "data_manifest.json").write_text(
+        canonical_json(manifest), encoding="utf-8"
+    )
+    (artifacts / "strategy_version.json").write_text(
+        canonical_json(version), encoding="utf-8"
+    )
+    report_path = artifacts / "execution_report.json"
+    report_bytes = json.dumps(
+        report, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=artifacts, prefix=".execution_report.", suffix=".tmp", delete=False,
+        ) as report_file:
+            temp_path = Path(report_file.name)
+            report_file.write(report_bytes)
+            report_file.flush()
+            os.fsync(report_file.fileno())
+        os.replace(temp_path, report_path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    from src.bt_runtime.report_artifact_integrity import write_report_integrity_sidecar
+
+    write_report_integrity_sidecar(report_path)
+    return report
 
 
 #: Bar spacing, in seconds, of every interval the runner accepts

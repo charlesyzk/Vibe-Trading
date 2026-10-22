@@ -67,6 +67,7 @@ def resolve_window(
     *,
     env_window: Optional[int] = None,
     learned_window: Optional[int] = None,
+    profile_window: Optional[int] = None,
 ) -> tuple[int, str]:
     """Return the model's context window and where the number came from.
 
@@ -84,6 +85,8 @@ def resolve_window(
         return int(env_window), "env:VIBE_TRADING_CONTEXT_WINDOW"
     if learned_window:
         return int(learned_window), "learned:context_length_error"
+    if profile_window:
+        return int(profile_window), "profile:exact_model"
     catalog = _catalog()
     provider = (provider or "").strip().lower()
     model = (model or "").strip()

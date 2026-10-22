@@ -1,8 +1,10 @@
 .venv/
 agent/.venv/
+ibkr-runtime/.venv/
 __pycache__/
 .pytest_cache/
 *.pyc
+*.egg-info/
 
 # Coverage reports
 .coverage
@@ -123,6 +125,11 @@ data/backup/
 
 # Internal docs (plans, specs)
 docs/
+# Keep the reviewed Backtrader integration handoff available to collaborators.
+!docs/
+docs/*
+!docs/backtrader-system/
+!docs/backtrader-system/**
 !wiki/docs/
 !wiki/docs/**
 docs/screenshots/agent-run.png

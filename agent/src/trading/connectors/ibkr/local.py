@@ -12,9 +12,11 @@ import socket
 import itertools
 import threading
 from dataclasses import asdict, dataclass
+from datetime import date, datetime, time
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from src.config.paths import get_runtime_root
 
@@ -482,6 +484,7 @@ def get_historical_bars(
     currency: str = "USD",
     sec_type: str = "STK",
     duration: str = "30 D",
+    end_date: date | None = None,
     bar_size: str = "1 day",
     what_to_show: str = "TRADES",
     use_rth: bool = True,
@@ -495,9 +498,16 @@ def get_historical_bars(
         contract = _make_contract(symbol, exchange=exchange, currency=currency, sec_type=sec_type)
         _qualify_contract(ib, contract)
         tier_unapplied = _apply_market_data_type(ib, cfg)
+        end_datetime = ""
+        if end_date is not None:
+            if not isinstance(end_date, date):
+                raise ValueError("end_date must be a date")
+            end_datetime = datetime.combine(
+                end_date, time(23, 59, 59), ZoneInfo("America/New_York"),
+            ).strftime("%Y%m%d %H:%M:%S US/Eastern")
         bars = ib.reqHistoricalData(
             contract,
-            endDateTime="",
+            endDateTime=end_datetime,
             durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow=what_to_show,
@@ -512,6 +522,15 @@ def get_historical_bars(
             "bar_size": bar_size,
             "market_data_type_requested": tier,
             "market_data_type_applied": None if tier_unapplied else tier,
+            "qualified_contract": {
+                "symbol": str(_obj_get(contract, "symbol", "")).upper(),
+                "local_symbol": str(_obj_get(contract, "localSymbol", "")),
+                "sec_type": str(_obj_get(contract, "secType", "")).upper(),
+                "exchange": str(_obj_get(contract, "exchange", "")),
+                "primary_exchange": str(_obj_get(contract, "primaryExchange", "")),
+                "currency": str(_obj_get(contract, "currency", "")).upper(),
+                "con_id": int(_obj_get(contract, "conId", 0) or 0),
+            },
             "bars": [_bar_to_dict(bar) for bar in bars],
         }
         if tier_unapplied:
@@ -568,8 +587,26 @@ class _TwsPool:
                 readonly=config.readonly,
                 account=config.account or "",
             )
-        except TypeError:
-            ib.connect(config.host, config.port, clientId=unique_id, timeout=config.timeout)
+        except TypeError as exc:
+            # Older ib_async builds may not accept the optional account hint.
+            # Preserve TWS's read-only guard on fallback; if that flag is not
+            # supported, fail closed instead of silently opening a writable API session.
+            try:
+                ib.connect(
+                    config.host,
+                    config.port,
+                    clientId=unique_id,
+                    timeout=config.timeout,
+                    readonly=config.readonly,
+                )
+            except TypeError as readonly_exc:
+                raise IBKRConnectionError(
+                    "Installed IBKR client does not support the required read-only connection flag"
+                ) from readonly_exc
+            except Exception as fallback_exc:  # noqa: BLE001
+                raise IBKRConnectionError(
+                    f"Could not connect to TWS / IB Gateway at {config.host}:{config.port}: {fallback_exc}"
+                ) from fallback_exc
         except Exception as exc:
             raise IBKRConnectionError(
                 f"Could not connect to TWS / IB Gateway at {config.host}:{config.port}: {exc}"

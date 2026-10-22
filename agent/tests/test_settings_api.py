@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import api_server
 from src.api import settings_routes
+from src.providers.capabilities import get_llm_credentials, get_provider_capabilities
 from tests.module_os_helpers import patch_module_os
 
 
@@ -58,6 +59,150 @@ def test_get_llm_settings_is_side_effect_free_and_hides_placeholders(
     assert body["env_path"].endswith(".env")
     assert body["reasoning_effort"] == "max"
     assert not (tmp_path / ".env").exists()
+
+
+def test_model_capability_profile_round_trips_for_exact_endpoint(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIBE_TRADING_HOME", str(tmp_path / "runtime"))
+    profile = {
+        "provider": "openrouter",
+        "base_url": "https://openrouter.ai/api/v1/",
+        "model_name": "deepseek/deepseek-v4-pro",
+        "context_window_tokens": 64000,
+        "supports_tool_calling": True,
+        "supports_reasoning": False,
+        "reasoning_efforts": [],
+        "input_modalities": ["text", "image"],
+    }
+
+    saved = client.put("/settings/llm/model-profile", json={"profile": profile})
+    assert saved.status_code == 200
+    assert saved.json()["base_url"] == "https://openrouter.ai/api/v1"
+
+    settings = client.get("/settings/llm")
+    assert settings.status_code == 200
+    assert settings.json()["model_profiles"] == [saved.json()]
+    assert (tmp_path / "runtime" / "model_profiles.json").exists()
+
+
+def test_runtime_api_key_status_is_visible_without_exposing_the_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-runtime-example-key")
+
+    response = client.get("/settings/llm")
+
+    assert response.status_code == 200
+    assert response.json()["api_key_configured"] is True
+    assert "sk-runtime-example-key" not in response.text
+
+
+def test_custom_provider_is_independent_of_openai_credentials(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom = next(item for item in client.get("/settings/llm").json()["providers"] if item["name"] == "custom")
+    assert custom["api_key_env"] == "CUSTOM_API_KEY"
+    assert custom["base_url_env"] == "CUSTOM_BASE_URL"
+    assert get_provider_capabilities("custom", "qwen3.8-max").top_level_reasoning_effort is False
+
+    monkeypatch.setenv("OPENAI_API_KEY", "official-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("CUSTOM_API_KEY", raising=False)
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+    credentials = get_llm_credentials("custom", "qwen3.8-max")
+    assert credentials["api_key"] == ""
+    assert credentials["base_url"] == "https://model.obei.com.cn/v1"
+
+
+def test_custom_settings_keep_launcher_key_when_saved(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGCHAIN_PROVIDER", "custom")
+    monkeypatch.setenv("LANGCHAIN_MODEL_NAME", "qwen3.8-max")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "https://model.obei.com.cn/v1")
+    monkeypatch.setenv("CUSTOM_API_KEY", "obei-runtime-secret")
+
+    response = client.put("/settings/llm", json={
+        "provider": "custom",
+        "model_name": "qwen3.8-max",
+        "base_url": "https://model.obei.com.cn/v1",
+    })
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "custom"
+    assert response.json()["api_key_configured"] is True
+    assert "obei-runtime-secret" not in response.text
+    assert "CUSTOM_API_KEY=obei-runtime-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_obei_openai_settings_migrate_key_only_to_same_endpoint(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGCHAIN_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://model.obei.com.cn/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "legacy-obei-secret")
+    monkeypatch.delenv("CUSTOM_API_KEY", raising=False)
+
+    response = client.put("/settings/llm", json={
+        "provider": "custom",
+        "model_name": "qwen3.8-max",
+        "base_url": "https://model.obei.com.cn/v1",
+    })
+
+    assert response.status_code == 200
+    assert response.json()["api_key_configured"] is True
+    assert "CUSTOM_API_KEY=legacy-obei-secret" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_custom_endpoint_change_drops_old_key(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGCHAIN_PROVIDER", "custom")
+    monkeypatch.setenv("CUSTOM_BASE_URL", "https://model.obei.com.cn/v1")
+    monkeypatch.setenv("CUSTOM_API_KEY", "old-relay-secret")
+
+    observed: dict[str, str] = {}
+
+    async def fake_list(provider, *, base_url: str, api_key: str):
+        observed.update(base_url=base_url, api_key=api_key)
+        return settings_routes.LLMModelsResponse(
+            provider=provider.name, models=["other-model"], source="provider",
+        )
+
+    monkeypatch.setattr(settings_routes, "_list_provider_models", fake_list)
+    discovery = client.post("/settings/llm/models", json={
+        "provider": "custom", "base_url": "https://other-relay.example/v1",
+    })
+    assert discovery.status_code == 200
+    assert observed == {"base_url": "https://other-relay.example/v1", "api_key": ""}
+
+    saved = client.put("/settings/llm", json={
+        "provider": "custom",
+        "model_name": "other-model",
+        "base_url": "https://other-relay.example/v1",
+    })
+    assert saved.status_code == 200
+    assert saved.json()["base_url"] == "https://other-relay.example/v1"
+    assert saved.json()["api_key_configured"] is False
+    assert "CUSTOM_API_KEY=" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_model_discovery_handles_missing_proxy_dependency(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingSocksClient:
+        def __init__(self, **kwargs):
+            raise ImportError("socksio is not installed")
+
+    monkeypatch.setattr(settings_routes.httpx, "AsyncClient", MissingSocksClient)
+    response = client.post("/settings/llm/models", json={
+        "provider": "custom",
+        "base_url": "https://model.obei.com.cn/v1",
+        "api_key": "temporary-key",
+    })
+    assert response.status_code == 200
+    assert response.json()["warning_code"] == "model_list_unavailable"
 
 
 def test_extract_model_ids_normalizes_openai_compatible_payloads() -> None:

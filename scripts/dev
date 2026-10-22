@@ -159,9 +159,41 @@ start_backend() {
     printf "backend already reachable at %s (external)\n" "$(service_url backend)"
     return
   fi
-  start_service backend env PYTHONPATH="$ROOT/agent" "$PYTHON_BIN" -c 'import cli, sys; raise SystemExit(cli.main(sys.argv[1:]))' serve \
-    --host "$BACKEND_HOST" \
-    --port "$BACKEND_PORT"
+  start_service backend "$PYTHON_BIN" -c '
+import os
+import sys
+from pathlib import Path
+from dotenv import dotenv_values
+
+root = Path(sys.argv[1])
+for candidate in reversed((Path.home() / ".vibe-trading" / ".env", root / "agent" / ".env")):
+    if candidate.is_file():
+        for key, value in dotenv_values(candidate, interpolate=False).items():
+            if value is not None:
+                os.environ[key] = value
+
+obei_url = "https://model.obei.com.cn/v1"
+openai_base = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
+provider = os.environ.get("LANGCHAIN_PROVIDER") or ("custom" if not openai_base or openai_base == obei_url else "openai")
+model = os.environ.get("LANGCHAIN_MODEL_NAME") or "qwen3.8-max"
+migrating_obei = provider == "openai" and openai_base == obei_url
+if migrating_obei:
+    # Older local installs classified the Obei relay as OpenAI.
+    provider = "custom"
+os.environ["LANGCHAIN_PROVIDER"] = provider
+os.environ["LANGCHAIN_MODEL_NAME"] = model
+if provider == "custom":
+    custom_base = os.environ.get("CUSTOM_BASE_URL", "").rstrip("/") or obei_url
+    if custom_base == obei_url and not os.environ.get("CUSTOM_API_KEY"):
+        os.environ["CUSTOM_API_KEY"] = os.environ.get("OBEI_API_KEY") or (os.environ.get("OPENAI_API_KEY", "") if migrating_obei else "")
+    if not os.environ.get("CUSTOM_BASE_URL"):
+        os.environ["CUSTOM_BASE_URL"] = obei_url
+os.environ["PYTHONPATH"] = str(root / "agent")
+os.execv(sys.executable, [
+    sys.executable, "-c", "import cli, sys; raise SystemExit(cli.main(sys.argv[1:]))",
+    "serve", "--host", sys.argv[2], "--port", sys.argv[3],
+])
+  ' "$ROOT" "$BACKEND_HOST" "$BACKEND_PORT"
 }
 
 start_frontend() {
@@ -172,6 +204,7 @@ start_frontend() {
   fi
   start_service frontend bash -lc '
     set -euo pipefail
+    export PATH="$HOME/.local/bin:$HOME/.local/node/bin:/opt/homebrew/bin:$PATH"
     cd "$1"
     if ! [[ -d node_modules ]]; then
       npm install

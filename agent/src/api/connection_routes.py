@@ -181,20 +181,31 @@ def register_connection_routes(app: FastAPI) -> None:
         "/api/connections/{connection_id}/check",
         dependencies=[Depends(require_auth)],
     )
-    def check_local_connection(connection_id: str):
+    def check_local_connection(connection_id: str, payload: dict | None = None):
         """Run the connector's read-only status check for one connection."""
         try:
             connection = store().get(connection_id)
+            overrides = {}
+            if payload and payload.get("port") is not None:
+                profile = profile_by_id(connection.profile_id)
+                if profile.connector != "ibkr" or profile.transport != "local_tws":
+                    raise ValueError("socket port override is only valid for a local IBKR connection")
+                port = int(payload["port"])
+                allowed_ports = {4002, 7497} if profile.environment == "paper" else {4001, 7496}
+                if port not in allowed_ports:
+                    raise ValueError("socket port does not match the selected IBKR environment")
+                overrides["port"] = port
             report = check_connection(
                 connection.profile_id,
                 connection_id=connection.id,
+                **overrides,
             )
             return {
                 "status": "ok",
                 "connection_id": connection.id,
                 "report": report,
             }
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, TypeError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.delete(

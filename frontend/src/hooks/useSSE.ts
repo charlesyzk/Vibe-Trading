@@ -93,6 +93,8 @@ export function useSSE(config?: SSEConfig) {
       "goal.created", "goal.evidence", "goal.updated",
       "mandate.proposal", "mandate.committed", "scheduled_research.proposal", "live.halted", "live.resumed", "live.action",
       "heartbeat", "done",
+      "control.state", "order.created", "order.state", "cancel.state", "broker.report", "fee.reported",
+      "activity.gap",
     ];
 
     const handleRaw = (eventType: string, raw: MessageEvent) => {

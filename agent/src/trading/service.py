@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import sys
+from dataclasses import replace
+from datetime import date
 from typing import Any
 
 from src.trading.profiles import list_profiles, profile_by_id
@@ -197,6 +199,7 @@ def check_connection(profile_id: str | None = None, **overrides: Any) -> dict[st
         report["connector"] = profile.connector
         report["environment"] = profile.environment
         report["transport"] = profile.transport
+        report["readonly"] = profile.readonly
         return report
 
     if profile.transport == "broker_sdk":
@@ -413,6 +416,7 @@ def get_history(
     currency: str = "USD",
     sec_type: str = "STK",
     duration: str = "30 D",
+    end_date: date | None = None,
     bar_size: str = "1 day",
     what_to_show: str = "TRADES",
     use_rth: bool = True,
@@ -440,6 +444,7 @@ def get_history(
                 currency=currency,
                 sec_type=sec_type,
                 duration=duration,
+                end_date=end_date,
                 bar_size=bar_size,
                 what_to_show=what_to_show,
                 use_rth=use_rth,
@@ -1427,6 +1432,7 @@ def _with_profile(profile: TradingProfile, payload: dict[str, Any]) -> dict[str,
     result["connector"] = profile.connector
     result["environment"] = profile.environment
     result["transport"] = profile.transport
+    result["readonly"] = profile.readonly
     return result
 
 
@@ -1440,12 +1446,12 @@ def _ibkr_config(profile: TradingProfile, overrides: dict[str, Any]):
         cfg = base
     else:
         cfg = default_cfg
-    return cfg.with_overrides(
+    return replace(cfg.with_overrides(
         host=_clean(overrides.get("host")),
         port=_int_or_none(overrides.get("port")),
         client_id=_int_or_none(overrides.get("client_id")),
         account=_clean(overrides.get("account")),
-    )
+    ), readonly=profile.readonly)
 
 
 def _remote_status(profile: TradingProfile) -> dict[str, Any]:
