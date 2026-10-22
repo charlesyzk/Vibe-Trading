@@ -1,80 +1,68 @@
-# Integrated Backtrader + IBKR usage
+# 使用说明：用 IBKR 行情回测策略
 
-## Data and execution flow
+这份说明面向日常使用者。第一次建议先用 AAPL 和一段较短的历史日期范围，确认流程熟悉后再换标的和策略。
 
-```mermaid
-flowchart LR
-    A[IBKR Gateway/TWS PAPER login] --> B[Read-only IBKR daily bars]
-    B --> C[Completed-bar importer and pinned session schedule]
-    C --> D[Review preview freezes strategy and data]
-    D --> E[Backtrader Cerebro + BackBroker]
-    F[Natural-language strategy] --> D
-    G[Uploaded Python strategy] --> H[Digest-pinned isolated worker]
-    H --> E
-    E --> I[Verified run report and data provenance]
-```
+## 先选适合自己的方式
 
-IBKR is the market-data source in this workflow. The downloaded historical snapshot is reviewed and frozen before confirmation; confirmation consumes the same snapshot instead of fetching different bars. Python code runs in the isolated worker and emits bounded event proposals; Backtrader's `BackBroker` performs the offline backtest.
+| 方式 | 适合谁 | 需要准备什么 |
+|---|---|---|
+| 用文字描述策略 | 不写代码的使用者 | 用自己的话描述买入和卖出规则。目前支持双均线交叉和明确周期的 RSI 阈值策略。 |
+| 上传 Python 文件 | 已有 Python 策略文件的使用者 | 一份按页面模板格式准备好的 `.py` 文件。模板是代码骨架；如果不熟悉 Python，请让开发人员先帮你准备文件。 |
 
-## One-time local setup
+两种方式都会先显示策略和数据预览。你检查并点击确认后，系统才会运行这次离线回测。
 
-1. Start IB Gateway or TWS and log in to a PAPER environment. Keep IBKR API Read-Only enabled. Standard local PAPER ports are Gateway `4002` and TWS `7497`; the UI lets you select the endpoint.
-2. Start the local application from the repository:
+## 开始前
 
-   ```sh
-   bash scripts/dev up
-   ```
+1. 打开 IBKR Gateway 或 TWS，登录 **模拟账户（PAPER）**，并保持程序运行。
+2. 打开 Vibe-Trading，在左侧进入 **策略执行 / Execution** 页面。
+3. 第一次使用时，在连接中心测试 IBKR 连接。选择 PAPER 配置：Gateway 通常使用端口 `4002`，TWS 通常使用 `7497`。保持模拟账户已登录；不要把 LIVE 配置当作 PAPER 使用。
+4. 确认要回测的股票代码和日期范围。首次可保留页面预填的 AAPL 示例。
 
-   The frontend is normally at `http://127.0.0.1:5899`; the backend is at `http://127.0.0.1:8899`.
+本机开发环境的 worker 和 IBKR 只读连接已配置。如果页面提示 Python worker 未配置，或连接测试失败，请联系维护人员处理；日常使用者不需要自行构建 Docker 镜像或修改环境变量。维护步骤见 [部署与维护说明](DEPLOYMENT.md)。
 
-3. For Python uploads, build the trusted worker image in the Docker context used by the backend. The checked-in Dockerfile pins its Python base image digest:
+## 方式一：用文字描述策略
 
-   ```sh
-   docker --context colima-vibe-execution build \
-     --network=none --pull=false \
-     --file agent/src/execution/strategy_worker_image/Dockerfile \
-     --tag vibe-strategy-worker:local \
-     agent/src/execution/strategy_worker_image
+1. 在页面上方的策略表单填写股票代码、Instrument ID、数据来源、开始和结束日期。
+   - 首次试用可保留预填的 `AAPL` 和 `AAPL.US`。
+   - 在数据来源中选择 IBKR 本地只读连接，再选 PAPER 配置和实际登录的 Gateway/TWS 端口。
+2. 在“用自然语言描述策略”中写明具体规则。例如：
 
-   docker --context colima-vibe-execution image inspect --format '{{.Id}}' vibe-strategy-worker:local
-   ```
+   > 5 日均线上穿 20 日均线时买入；5 日均线下穿 20 日均线时卖出。
 
-   Put the inspected immutable image ID in the user-level `~/.vibe-trading/.env` and set the context:
+3. 点击 **预览策略规则**。系统会检查规则是否属于当前支持的模板，并读取 IBKR 历史日线。
+4. 先核对预览卡片里的买入/卖出条件、标的、日期、行情来源、资金分配和成本假设。策略描述不完整时，按页面提示补充；不支持的规则不会进入回测。
+5. 确认无误后点击 **确认并运行离线回测**。
+6. 在结果区域查看回测报告、收益和费用等指标，以及报告完整性状态。点击报告链接可打开已保存的运行详情。
 
-   ```dotenv
-   DOCKER_CONTEXT=colima-vibe-execution
-   VIBE_PYTHON_WORKER_IMAGE=sha256:<inspected-image-id>
-   ```
+## 方式二：上传 Python 策略
 
-   Restart the backend after changing this file:
+这条方式需要一个已经准备好的 `.py` 策略文件。页面提供 **下载 Python 回调模板**，但模板只是骨架，不会自动把自然语言策略变成 Python 策略。
 
-   ```sh
-   bash scripts/dev restart backend
-   ```
+1. 在 Python 上传区域填写策略 ID、股票代码和 Instrument ID。首次试用可保留 `AAPL` 和 `AAPL.US`。
+2. 选择 IBKR PAPER 配置和当前登录的 Gateway/TWS 端口。
+3. 设置日期范围：
+   - **暖机日期**用于让指标积累所需历史数据；
+   - **评估日期**是统计策略表现的区间。
+   首次运行可选较短且有完整交易日线的区间；暖机区间应早于评估区间。
+4. 点击 **从 IBKR 获取日线**。成功后页面会自动填入行情文件和交易日历文件，不需要自行制作 CSV 或 JSON。
+5. 上传准备好的 `.py` 文件。除非你清楚字段含义，否则先保留自动填入的行情信息、费用和滑点默认值。
+6. 点击 **校验并预览上传内容**。核对策略 ID、标的、行情来源、完整日线数量、日期范围和运行状态。
+7. 确认后点击 **确认并运行 Backtrader**，然后查看保存的报告和完整性状态。
 
-   The current machine has this configured already. The image must exist in the selected Docker daemon; the application does not pull or build worker images at runtime.
+如果预览提示行情文件、日历或日期不完整，不要手工猜填时间戳；调整日期范围后重新获取行情。若提示 worker 未配置，请联系维护人员。
 
-## NL2 backtest
+## 结果应该怎样理解
 
-1. Open the **Execution** page and select the natural-language strategy entry.
-2. Describe a supported strategy and choose the instrument, date window, and local IBKR PAPER profile. Select Gateway PAPER `4002` or TWS PAPER `7497` as appropriate.
-3. Request a preview. Review the parsed strategy, date range, IBKR data provenance, bar count, calendar, and the frozen snapshot details.
-4. Confirm the preview to run Backtrader. Inspect the final metrics, order/fill trace, data snapshot, and report-integrity status.
+- 本流程使用 IBKR 的**历史日线**，在 Backtrader 中做离线回测；完成回测不会向 IBKR 提交订单。
+- “报告完整性已验证”表示报告与系统的回放校验一致；它不代表策略一定赚钱，也不代表 IBKR 行情的复权、历史可用时点或市场数据许可已获认证。
+- AAPL 实时行情此前因缺少 IBKR 对应订阅返回过 `10089`。当前回测使用历史数据，不依赖这项实时订阅。
+- 查询账户持仓、订单预演、PAPER 下单和真实交易属于独立流程，不在本使用说明的操作范围内。真实交易仍暂缓。
 
-The preview and confirmation use the same frozen historical bars. A missing or incomplete daily session causes the importer to reject the preview.
+## 常见问题
 
-## Python upload backtest
-
-1. Prepare a Python strategy with the supported `on_event(event, state)` interface. Start from `frontend/public/templates/vibe_strategy_template.py`; the worker receives one completed bar per event and a JSON checkpoint.
-2. On the **Execution** page, select Python upload, upload the `.py` file, choose an instrument and date window, then select IBKR PAPER and the local port.
-3. Request an IBKR market-data preview. Review the generated CSV, pinned XNYS session schedule, strategy/source identity, worker image digest, and runability status.
-4. Confirm the same preview to run the isolated worker and Backtrader. Inspect the report and integrity result.
-
-If the preview says the worker image is unavailable, check the backend's `VIBE_PYTHON_WORKER_IMAGE` and `DOCKER_CONTEXT`, verify the image exists in that context, then restart the backend. A mutable tag such as `:latest` is not accepted as the worker identity.
-
-## Scope and operating boundary
-
-- This workflow performs historical-data backtests with Backtrader. It does not submit an IBKR order.
-- An IBKR handshake and historical data access do not verify the selected account's positions or balances. Use the read-only connection check for connection evidence; account identity and position checks are separate acceptance items.
-- Current verified data is AAPL daily history. Streaming AAPL may require an additional IBKR market-data subscription; the prior `10089` response remains unresolved.
-- Real order execution, including PAPER order acknowledgement, fill callbacks, cancellation, restart recovery, and reconciliation, requires a separate reviewed workflow. Live trading remains deferred.
+| 页面现象 | 建议处理 |
+|---|---|
+| IBKR 连接失败 | 确认 Gateway/TWS 正在运行且已登录 PAPER；核对选的是 Gateway `4002` 还是 TWS `7497`。 |
+| 找不到或无法获取行情 | 检查股票代码和日期范围；部分标的可能需要 IBKR 市场数据权限。缩短区间后再试。 |
+| 策略不受支持 | 文字策略入口目前只支持双均线交叉或明确周期的 RSI 阈值规则。使用准确的买入、卖出条件，或缩小策略规则。 |
+| Python 上传无法预览或运行 | 先确认上传文件是按页面模板准备的 `.py` 文件；worker 或数据问题请联系维护人员，并提供页面错误文字，不要提供密码或验证码。 |
