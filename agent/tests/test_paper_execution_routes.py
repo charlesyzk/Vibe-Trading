@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import threading
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ import api_server
 from src.api import state as api_state
 from src.api import security as api_security
 from src.api.paper_execution_routes import register_paper_execution_routes
+import src.api.paper_execution_routes as paper_routes
 from src.api.security import require_auth, require_event_stream_auth
 from src.execution.paper_execution_manager import (
     PaperExecutionManager,
@@ -98,6 +100,201 @@ def test_activity_route_is_authenticated_bounded_and_uses_manager_scope_only():
     assert "attacker" not in response.text
     assert seen_limits == [7]
     assert client.get("/api/execution/paper/activity?limit=101").status_code == 422
+
+
+def test_stopped_activity_route_reads_only_trusted_scope_without_broker_connection(tmp_path):
+    from decimal import Decimal
+    from tests.execution.test_order_ledger import intent, report
+    from src.execution.order_ledger import BrokerEventKind
+
+    ledger = SQLiteOrderLedger(tmp_path / "history.sqlite")
+    trusted = PaperRuntimeScope("IBKR", "DU-TRUSTED", Environment.PAPER)
+    own = ledger.create_intent(intent(broker="IBKR", account_ref=trusted.account_ref, decision_id="own"))
+    ledger.reserve(own.intent_id, "reservation-own", "123.45")
+    ledger.start_send(own.intent_id, attempt_id="attempt-own", client_order_id="client-own")
+    ledger.record_broker_event(report(own.intent_id, BrokerEventKind.ACK, "ack-own", broker="IBKR",
+                                      account_ref=trusted.account_ref, broker_order_id="77"))
+    ledger.record_broker_event(report(own.intent_id, BrokerEventKind.FILL, "fill-own", broker="IBKR",
+                                      account_ref=trusted.account_ref, broker_order_id="77",
+                                      broker_exec_id="exec-own", quantity=10, price=Decimal("12.50")))
+    rejected = ledger.create_intent(intent(broker="IBKR", account_ref=trusted.account_ref, decision_id="rejected", input_event_seq=43))
+    ledger.reserve(rejected.intent_id, "reservation-rejected", "123.45")
+    ledger.start_send(rejected.intent_id, attempt_id="attempt-rejected", client_order_id="client-rejected")
+    ledger.record_broker_event(report(rejected.intent_id, BrokerEventKind.REJECT, "reject-own", broker="IBKR",
+                                      account_ref=trusted.account_ref, broker_order_id="78"))
+    other = ledger.create_intent(intent(broker="IBKR", account_ref="DU-OTHER", decision_id="other"))
+    manager = PaperExecutionManager(runtime_factory=None)
+    manager.bind_stopped_activity(trusted, ledger)
+    response = TestClient(_app(manager=manager)).get(
+        "/api/execution/paper/activity?account_ref=DU-OTHER&environment=live"
+    )
+    assert response.status_code == 200, response.text
+    activity = response.json()
+    orders = {order["intent_id"]: order for order in activity["orders"]}
+    assert set(orders) == {own.intent_id, rejected.intent_id}
+    assert orders[own.intent_id]["state"] == "FILLED"
+    assert orders[own.intent_id]["fills"][0]["broker_exec_id"] == "exec-own"
+    assert orders[rejected.intent_id]["state"] == "REJECTED"
+    assert other.intent_id not in response.text
+    assert activity["positions"]["source"] == "unknown"
+    assert manager.status() is None
+
+
+def test_integration_test_status_exposes_only_fixed_order_and_window():
+    app = _app()
+    app.state.paper_execution_composition = SimpleNamespace(
+        integration_test_runner=SimpleNamespace(status_snapshot=lambda: {
+            "configured": True,
+            "enabled": True,
+            "window_open": False,
+            "valid_window_utc": {"start": "2026-11-02T14:30:00Z", "end": "2026-11-02T21:00:00Z"},
+            "symbol": "AAPL",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": "LMT",
+            "limit_price": "400.00",
+            "time_in_force": "DAY",
+            "regular_trading_hours_only": True,
+            "max_notional_usd": "400",
+            "strategy_version_id": "a" * 64,
+        }),
+    )
+
+    response = TestClient(app).get("/api/execution/paper/integration-test/status")
+
+    assert response.status_code == 200
+    assert response.json()["window_open"] is False
+    assert response.json()["limit_price"] == "400.00"
+    assert response.json()["quantity"] == 1
+    assert "account_ref" not in response.json()
+
+
+def test_integration_run_reports_stale_signal_without_exposing_other_failures():
+    from src.execution.paper_integration_test_composition import PaperSignalSessionMismatch
+
+    app = _app()
+    def fail(error):
+        def runner(_principal):
+            raise error
+        app.state.paper_execution_composition = SimpleNamespace(integration_test_runner=runner)
+        return TestClient(app).post("/api/execution/paper/integration-test/run")
+
+    stale = fail(PaperSignalSessionMismatch("private details"))
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "paper_signal_session_mismatch"
+    assert "private details" not in stale.text
+    other = fail(RuntimeError("private details"))
+    assert other.status_code == 409
+    assert "private details" not in other.text
+    assert other.json()["detail"] == "one-shot PAPER integration action failed closed"
+
+
+def test_strategy_candidate_route_returns_verified_catalog_without_account_scope(monkeypatch):
+    result = {
+        "items": [{
+            "strategy_version_id": "a" * 64,
+            "strategy_id": "sample",
+            "backtest_status": "verified",
+            "paper_deployable": False,
+            "paper_block_reasons": ["no_trusted_paper_deployment_for_this_version"],
+        }],
+        "deployment_mode": "fixed_one_shot_paper_integration",
+        "supported_order": {"instrument": "AAPL", "quantity": 1},
+    }
+    monkeypatch.setattr(paper_routes, "list_paper_strategy_candidates", lambda: result)
+
+    response = TestClient(_app()).get("/api/execution/paper/strategy-candidates")
+
+    assert response.status_code == 200
+    assert response.json() == result
+    assert "account_ref" not in response.text
+
+
+def test_select_candidate_replaces_stopped_composition_without_submitting_order(monkeypatch):
+    version_id = "b" * 64
+    principal = Principal("fixture-human", AuthMethod.FEDERATED_IDENTITY)
+    old_manager = SimpleNamespace(
+        _lock=threading.RLock(),
+        status=lambda: None,
+        runtime_factory=SimpleNamespace(strategy_version_id="a" * 64),
+    )
+    old_readiness = PaperExecutionReadiness()
+    old_scope = PaperRuntimeScope("IBKR", "trusted-paper-scope", Environment.PAPER)
+    old_composition = SimpleNamespace(
+        manager=old_manager,
+        readiness=old_readiness,
+        scope=old_scope,
+        integration_test_runner=SimpleNamespace(_lock=threading.Lock()),
+    )
+    app = _app(manager=old_manager, readiness=old_readiness)
+    app.state.paper_execution_scope = old_scope
+    app.state.paper_execution_composition = old_composition
+    app.dependency_overrides[require_auth] = lambda: principal
+    replacement_manager = SimpleNamespace(
+        _lock=threading.RLock(),
+        status=lambda: None,
+        runtime_factory=SimpleNamespace(strategy_version_id=version_id),
+    )
+    replacement = SimpleNamespace(
+        manager=replacement_manager,
+        readiness=PaperExecutionReadiness(),
+        scope=old_scope,
+        integration_test_runner=SimpleNamespace(),
+    )
+    monkeypatch.setattr(paper_routes, "paper_execution_ledger_is_empty", lambda: True)
+    monkeypatch.setattr(paper_routes, "prepare_paper_strategy_selection", lambda *args, **kwargs: {
+        "strategy_version_id": version_id,
+        "report_sha256": "c" * 64,
+    })
+    monkeypatch.setattr(paper_routes, "commit_paper_strategy_selection", lambda _receipt: None)
+    monkeypatch.setattr(paper_routes, "rollback_paper_strategy_selection", lambda _receipt: None)
+    monkeypatch.setattr(
+        "src.execution.paper_integration_test_composition.build_paper_integration_test_composition",
+        lambda: replacement,
+    )
+
+    def install(manager, readiness, *, app, scope):
+        app.state.paper_execution_manager = manager
+        app.state.paper_execution_readiness = readiness
+        app.state.paper_execution_scope = scope
+
+    monkeypatch.setattr(paper_routes, "_set_paper_execution_composition", install)
+    response = TestClient(app).post(
+        "/api/execution/paper/strategy-candidates/select",
+        json={"strategy_version_id": version_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["strategy_version_id"] == version_id
+    assert response.json()["order_submission_performed"] is False
+    assert app.state.paper_execution_manager is replacement_manager
+    assert app.state.paper_execution_composition is replacement
+
+
+def test_select_candidate_refuses_an_active_runtime(monkeypatch):
+    principal = Principal("fixture-human", AuthMethod.FEDERATED_IDENTITY)
+    manager = SimpleNamespace(
+        _lock=threading.RLock(),
+        status=lambda: object(),
+        runtime_factory=SimpleNamespace(strategy_version_id="a" * 64),
+    )
+    scope = PaperRuntimeScope("IBKR", "trusted-paper-scope", Environment.PAPER)
+    app = _app(manager=manager, readiness=PaperExecutionReadiness())
+    app.state.paper_execution_scope = scope
+    app.state.paper_execution_composition = SimpleNamespace(
+        manager=manager,
+        readiness=PaperExecutionReadiness(),
+        scope=scope,
+        integration_test_runner=SimpleNamespace(_lock=threading.Lock()),
+    )
+    app.dependency_overrides[require_auth] = lambda: principal
+    monkeypatch.setattr(paper_routes, "paper_execution_ledger_is_empty", lambda: True)
+    response = TestClient(app).post(
+        "/api/execution/paper/strategy-candidates/select",
+        json={"strategy_version_id": "b" * 64},
+    )
+
+    assert response.status_code == 409
 
 
 def test_activity_route_rejects_missing_bearer_auth(monkeypatch):

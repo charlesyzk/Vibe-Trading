@@ -46,6 +46,9 @@ class ManagedRuntimeError(RuntimeError):
     """The PAPER runtime could not reach a verified lifecycle state."""
 
 
+_IBAPI_MAX_REQUEST_ID = (1 << 31) - 1
+
+
 class IbkrManagedPaperRuntime:
     """Compose SDK process, durable callback consumer, recovery and lifecycle.
 
@@ -187,7 +190,11 @@ class IbkrManagedPaperRuntime:
         self.stop_timeout = float(stop_timeout)
         self.poll_interval = float(poll_interval)
         self.snapshot_freshness_seconds = float(snapshot_freshness_seconds)
-        self.snapshot_id_factory = snapshot_id_factory or (lambda: secrets.randbelow(2**62) + 1)
+        # Snapshot IDs also become reqAccountSummary request IDs, which are
+        # signed 32-bit integers in the official IBKR API/protobuf schema.
+        self.snapshot_id_factory = snapshot_id_factory or (
+            lambda: secrets.randbelow(_IBAPI_MAX_REQUEST_ID) + 1
+        )
         # Bind the trusted callback facts to this exact runtime's durable
         # consumers, even if the caller assembled the pump independently.
         callback_pump.next_valid_id_sink = allocator.observe_next_valid_id
@@ -201,6 +208,8 @@ class IbkrManagedPaperRuntime:
         self._process_closed = False
         self._monitor_started = False
         self._latest_snapshot_id: int | None = None
+        self._latest_activity_snapshot_available = False
+        self._last_start_stage: str | None = None
         self._external_recovery_check = service.recovery_check
         self._external_activation_check = service.activation_check
         self._external_quiesce_check = service.quiesce_check
@@ -217,6 +226,32 @@ class IbkrManagedPaperRuntime:
     @property
     def durable_database_paths(self) -> tuple[str, ...]:
         return (self.ledger.path, self.order_index.path, self.allocator.path, self.snapshot_store.path)
+
+    def discard_unstarted(self) -> None:
+        """Release construction-time resources for a runtime that never started.
+
+        Deployment composition can fail after the allocator has acquired its
+        process lock but before this runtime is returned to the manager. This
+        narrow cleanup path is safe only while no child, callback worker,
+        health monitor, or account lease exists.
+        """
+        with self._lock:
+            if (
+                self._started
+                or self.process.pid is not None
+                or self.service.lease_held
+                or self._worker_started
+                or self.callback_worker.alive
+                or self._monitor_started
+                or self.health_monitor.alive
+            ):
+                raise ManagedRuntimeError("cannot discard a started or leased IBKR runtime")
+            self.allocator.close()
+
+    @property
+    def last_start_stage(self) -> str | None:
+        """Return the last safe startup phase marker for local diagnostics."""
+        return self._last_start_stage
 
     def latest_reconciled_snapshot(self) -> dict:
         """Return the latest proven PAPER snapshot while runtime remains PAUSED.
@@ -265,20 +300,111 @@ class IbkrManagedPaperRuntime:
                 raise ManagedRuntimeError("latest runtime snapshot lacks a current matching reconciliation proof")
             return snapshot
 
+    def latest_reconciled_activity_snapshot(self) -> dict:
+        """Return fresh reconciled positions for the PAPER activity surface.
+
+        Post-activation risk snapshots are suitable for operator visibility,
+        but never for hydrating a newly constructed Backtrader broker.
+        """
+        with self._lock:
+            state, _reason = self.service.state()
+            if state is not ExecutionControlState.PAUSED or not self.service.lease_held:
+                raise ManagedRuntimeError("activity positions require a paused, leased PAPER runtime")
+            if self._latest_snapshot_id is None:
+                raise ManagedRuntimeError("no current reconciled activity snapshot is available")
+            self._assert_sdk_healthy()
+            snapshot = self.snapshot_store.complete_snapshot(self._latest_snapshot_id)
+            proof = snapshot.get("reconciliation_result")
+            try:
+                completed_at = datetime.fromisoformat(str(snapshot.get("completed_at_utc")))
+                if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+                    raise ValueError("snapshot completion time must be timezone-aware")
+                age = (datetime.now(timezone.utc) - completed_at.astimezone(timezone.utc)).total_seconds()
+            except (TypeError, ValueError) as exc:
+                raise ManagedRuntimeError("activity snapshot has an invalid completion timestamp") from exc
+            if age < -5 or age > self.snapshot_freshness_seconds:
+                raise ManagedRuntimeError("activity snapshot exceeded its freshness window")
+            checks = proof.get("checks", []) if isinstance(proof, dict) else []
+            risk_refresh_proof = (
+                self._latest_activity_snapshot_available
+                and isinstance(proof, dict)
+                and proof.get("purpose") == "risk_refresh"
+                and isinstance(checks, list)
+                and {"scope", "open_orders", "positions"}.issubset(checks)
+            )
+            startup_reconciliation_proof = (
+                self._hydration_snapshot_available
+                and isinstance(checks, list)
+                and {"scope", "open_orders", "positions", "order_id_high_water_mark"}.issubset(checks)
+                and self._recovery_proof_valid()
+            )
+            if (
+                snapshot.get("capture_complete") is not True
+                or snapshot.get("reconciled") is not True
+                or snapshot.get("account_ref") != self.account_ref
+                or snapshot.get("environment") != Environment.PAPER.value
+                or not isinstance(proof, dict)
+                or proof.get("snapshot_id") != self._latest_snapshot_id
+                or proof.get("account_ref") != self.account_ref
+                or proof.get("environment") != Environment.PAPER.value
+                or not (risk_refresh_proof or startup_reconciliation_proof)
+            ):
+                raise ManagedRuntimeError("activity snapshot lacks a current PAPER reconciliation proof")
+            return snapshot
+
+    def refresh_risk_snapshot(self) -> dict:
+        """Capture and reconcile fresh account/order/position facts for risk.
+
+        This is callable while PAUSED or RUNNING under the current owner
+        lease. It does not reopen, close, or advance the order-id allocator;
+        any mismatch pauses a RUNNING scope before the caller can continue.
+        """
+        with self._lock:
+            state, _reason = self.service.state()
+            if state not in {ExecutionControlState.PAUSED, ExecutionControlState.RUNNING}:
+                raise ManagedRuntimeError("risk refresh requires a PAUSED or RUNNING managed PAPER runtime")
+            if not self.service.lease_held or not self._started or self._process_closed:
+                raise ManagedRuntimeError("risk refresh requires the current live runtime owner lease")
+            try:
+                self._raise_worker_failure()
+                self._assert_sdk_healthy()
+                snapshot_id = self.snapshot_id_factory()
+                if type(snapshot_id) is not int or not 1 <= snapshot_id <= _IBAPI_MAX_REQUEST_ID:
+                    raise ManagedRuntimeError("snapshot id factory must return a positive 32-bit IBKR request id")
+                self.coordinator.request_snapshot(snapshot_id)
+                self._wait_for_snapshot(snapshot_id)
+                snapshot = self.reconciler.reconcile_risk_snapshot(snapshot_id)
+                self._latest_snapshot_id = snapshot_id
+                self._latest_activity_snapshot_available = (
+                    self.service.state()[0] is ExecutionControlState.PAUSED
+                )
+                return snapshot
+            except Exception as exc:
+                current_state, _reason = self.service.state()
+                if current_state in {ExecutionControlState.PAUSED, ExecutionControlState.RUNNING}:
+                    try:
+                        self.service.pause(reason="ibkr_risk_snapshot_reconciliation_failed")
+                    except Exception:
+                        pass
+                raise ManagedRuntimeError("fresh PAPER risk snapshot failed reconciliation") from exc
+
     def start_paused(self) -> None:
         """Explicitly connect, consume callbacks, reconcile, then remain PAUSED."""
         with self._lock:
             if self._process_closed:
                 raise ManagedRuntimeError("closed SDK child cannot be reused; construct a new runtime epoch")
+            stage = "begin_recovery"
             try:
                 if not self._started:
                     self.service.begin_recovery()
+                    stage = "spawn_sdk_process"
                     status = self.process.start_process()
                     if status.get("state") != "NEW":
                         raise ManagedRuntimeError("SDK child did not start in the disconnected NEW state")
                     self.callback_worker.start()
                     self._worker_started = True
                     self._started = True
+                    stage = "connect_gateway"
                     self.process.request(
                         "start", host=self.gateway_host, port=self.gateway_port, client_id=self.client_id,
                     )
@@ -286,25 +412,36 @@ class IbkrManagedPaperRuntime:
                     self.service.begin_recovery()
 
                 if not self._connected:
+                    stage = "wait_for_sdk_handshake"
                     self._wait_for_sdk_handshake()
                     self._connected = True
                 else:
+                    stage = "request_fresh_order_id"
                     self._request_fresh_order_id()
+                stage = "verify_sdk_health"
                 self._assert_sdk_healthy()
+                stage = "capture_account_snapshot"
                 snapshot_id = self.snapshot_id_factory()
-                if type(snapshot_id) is not int or snapshot_id <= 0:
-                    raise ManagedRuntimeError("snapshot id factory must return a positive integer")
+                if type(snapshot_id) is not int or not 1 <= snapshot_id <= _IBAPI_MAX_REQUEST_ID:
+                    raise ManagedRuntimeError(
+                        "snapshot id factory must return a positive 32-bit IBKR request id"
+                    )
                 self._latest_snapshot_id = snapshot_id
                 self.coordinator.request_snapshot(snapshot_id)
                 self._wait_for_snapshot(snapshot_id)
+                stage = "reconcile_account_snapshot"
                 self.reconciler.reconcile(snapshot_id)
+                stage = "complete_recovery"
                 self.service.complete_recovery()
                 self._hydration_snapshot_available = True
+                stage = "start_health_monitor"
                 self._assert_sdk_healthy()
                 if not self._monitor_started:
                     self.health_monitor.start()
                     self._monitor_started = True
+                self._last_start_stage = None
             except Exception:
+                self._last_start_stage = stage
                 try:
                     if self.service.state()[0] is ExecutionControlState.RECOVERING:
                         self.service.abort_recovery(reason="managed_runtime_recovery_failed")
@@ -356,6 +493,7 @@ class IbkrManagedPaperRuntime:
                 raise ManagedRuntimeError("fresh broker reconciliation proof is required before activation")
             self.service.activate()
             self._hydration_snapshot_available = False
+            self._latest_activity_snapshot_available = False
 
     def pause(self, *, reason: str) -> None:
         with self._lock:
@@ -534,6 +672,11 @@ class IbkrManagedPaperRuntime:
                 if not self.callback_worker.stop(timeout=self.stop_timeout):
                     return False
                 self._worker_started = False
+            # The allocator owns an OS lock for this runtime epoch. Release it
+            # only after the child and callback consumer have both stopped;
+            # a later manager start will construct a fresh allocator and
+            # require a new nextValidId plus account reconciliation.
+            self.allocator.close()
             return True
         except Exception:
             # PaperExecutionService retains STOPPING and its account lease

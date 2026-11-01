@@ -47,7 +47,7 @@ class CallbackPumpFatal(RuntimeError):
 # Keep this allowlist deliberately narrow: warnings with uncertain data or
 # order implications must continue through the fail-closed path below.
 _NON_FATAL_IBKR_STATUS_CODES = frozenset({2104, 2106, 2107, 2108, 2158})
-_IBKR_CONNECTIVITY_CODES = frozenset({1100, 1101, 1102, 1300})
+_IBKR_CONNECTIVITY_CODES = frozenset({1100, 1101, 1102, 1300, 2110})
 
 
 @dataclass(frozen=True, slots=True)

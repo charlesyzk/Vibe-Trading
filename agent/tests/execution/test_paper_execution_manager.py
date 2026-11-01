@@ -102,6 +102,19 @@ def test_missing_runtime_factory_has_no_start_side_effect(tmp_path):
     assert manager.status() is None
 
 
+def test_failed_pre_runtime_factory_construction_retains_only_safe_error_code():
+    def fail_factory(_scope):
+        raise ValueError("sensitive account or transport details")
+
+    manager = PaperExecutionManager(runtime_factory=fail_factory, startup_readiness=_ready())
+
+    with pytest.raises(PaperExecutionManagerError, match="safe paused startup"):
+        manager.start(_scope())
+
+    assert manager.status() is None
+    assert manager.last_start_error_code == "ValueError"
+
+
 def test_activity_uses_active_trusted_scope_and_marks_unproven_positions_unknown(tmp_path):
     manager = PaperExecutionManager(
         runtime_factory=lambda scope: FakePaperRuntime(scope, tmp_path / "activity.sqlite"),
@@ -130,6 +143,36 @@ def test_activity_uses_active_trusted_scope_and_marks_unproven_positions_unknown
     assert manager.shutdown_active_runtime() is False
     manager._entry.runtime.quiescent = True
     assert manager.shutdown_active_runtime() is True
+
+
+def test_stopped_activity_reads_only_bound_scope_and_never_claims_fresh_positions(tmp_path):
+    path = tmp_path / "stopped-history.sqlite"
+    ledger = SQLiteOrderLedger(path)
+    trusted = _scope("trusted-account")
+    other = _scope("other-account")
+    ledger.set_execution_control(broker=other.broker, account_ref=other.account_ref,
+                                 environment=other.environment, state=ExecutionControlState.RUNNING,
+                                 reason="other-scope")
+    manager = PaperExecutionManager(runtime_factory=lambda scope: FakePaperRuntime(scope, path),
+                                    startup_readiness=_ready())
+    manager.bind_stopped_activity(trusted, ledger)
+    assert manager.activity_snapshot()["latest_activity_seq"] == 0
+    manager.start(trusted)
+    manager._entry.runtime.quiescent = True
+    assert manager.shutdown_active_runtime() is True
+    from tests.execution.test_order_ledger import intent
+    trusted_order = ledger.create_intent(intent(broker="IBKR", account_ref=trusted.account_ref, decision_id="trusted-order"))
+    other_order = ledger.create_intent(intent(broker="IBKR", account_ref=other.account_ref, decision_id="other-order"))
+    after_stop = manager.activity_snapshot()
+    assert [order["intent_id"] for order in after_stop["orders"]] == [trusted_order.intent_id]
+    assert other_order.intent_id not in str(after_stop)
+    assert after_stop["control_reason"] == "runtime_stopped_broker_snapshot_unavailable"
+    assert after_stop["positions"]["source"] == "unknown"
+    assert "other-scope" not in str(after_stop)
+    assert manager.status() is None
+    restarted = PaperExecutionManager(runtime_factory=None)
+    restarted.bind_stopped_activity(trusted, SQLiteOrderLedger(path))
+    assert restarted.activity_snapshot() == after_stop
 
 
 def test_activity_event_reader_uses_only_manager_active_scope(tmp_path):

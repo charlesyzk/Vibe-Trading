@@ -30,6 +30,7 @@ vi.mock("@/lib/api", () => ({
       runtime_factory_registered: false,
       composition_ready: false,
       missing_requirements: [
+        "ibkr_runtime_factory",
         "strategy_session_builder",
         "attributable_control_authorizer",
         "account_reconciliation_facts",
@@ -44,7 +45,24 @@ vi.mock("@/lib/api", () => ({
       last_error_code: null,
     }),
     getPaperExecutionActivity: vi.fn().mockRejectedValue(new Error("no active PAPER runtime")),
+    cancelPaperExecutionOrder: vi.fn(),
+    getPaperIntegrationTestStatus: vi.fn().mockResolvedValue({
+      configured: false, enabled: false, window_open: false,
+      valid_window_utc: { start: "2026-11-02T14:30:00Z", end: "2026-11-02T21:00:00Z" },
+      symbol: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00",
+      time_in_force: "DAY", regular_trading_hours_only: true, max_notional_usd: "400",
+      strategy_version_id: "a".repeat(64),
+      backtest_attestation: { status: "verified", evaluation_start: "2026-10-30", evaluation_end: "2026-10-30", suggested_warmup_date: "2026-10-29" },
+    }),
+    getPaperStrategyCandidates: vi.fn().mockResolvedValue({
+      items: [], deployment_mode: "fixed_one_shot_paper_integration",
+      supported_order: { instrument: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00", time_in_force: "DAY" },
+    }),
+    selectPaperStrategyCandidate: vi.fn(),
+    runPaperIntegrationTest: vi.fn(),
     paperExecutionActivityEventsUrl: vi.fn((afterSeq: number) => `/api/execution/paper/activity/events?after_seq=${afterSeq}`),
+    startPaperExecution: vi.fn(),
+    activatePaperExecution: vi.fn(),
     pausePaperExecution: vi.fn(),
     previewExecutionBacktest: vi.fn(),
     createExecutionBacktest: vi.fn(),
@@ -74,6 +92,7 @@ describe("Execution page", () => {
       runtime_factory_registered: false,
       composition_ready: false,
       missing_requirements: [
+        "ibkr_runtime_factory",
         "strategy_session_builder",
         "attributable_control_authorizer",
         "account_reconciliation_facts",
@@ -87,6 +106,18 @@ describe("Execution page", () => {
       reason: "runtime_composition_not_configured",
       last_error_code: null,
     });
+    vi.mocked(api.getPaperIntegrationTestStatus).mockResolvedValue({
+      configured: false, enabled: false, window_open: false,
+      valid_window_utc: { start: "2026-11-02T14:30:00Z", end: "2026-11-02T21:00:00Z" },
+      symbol: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00",
+      time_in_force: "DAY", regular_trading_hours_only: true, max_notional_usd: "400",
+      strategy_version_id: "a".repeat(64),
+      backtest_attestation: { status: "verified", evaluation_start: "2026-10-30", evaluation_end: "2026-10-30" },
+    });
+    vi.mocked(api.getPaperStrategyCandidates).mockResolvedValue({
+      items: [], deployment_mode: "fixed_one_shot_paper_integration",
+      supported_order: { instrument: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00", time_in_force: "DAY" },
+    });
   });
 
   it("shows the verified offline Backtrader fixture and makes its limits explicit", async () => {
@@ -98,14 +129,156 @@ describe("Execution page", () => {
     expect(screen.getByText("12 synthetic daily bars")).toBeInTheDocument();
     expect(screen.getByText("3 · BUY / SELL / BUY")).toBeInTheDocument();
     expect(screen.getByText("Open position reported")).toBeInTheDocument();
-    expect(screen.getByText(/isolated Backtrader offline upload API is available/)).toBeInTheDocument();
-    expect(screen.getAllByText(/source claims, point-in-time availability, calendar/)).toHaveLength(2);
+    expect(screen.getByText(/Uploaded strategies can be frozen and backtested offline/)).toBeInTheDocument();
+    expect(screen.getByText(/Publication timing and adjustment semantics remain unverified/)).toBeInTheDocument();
     expect(await screen.findByText(/No trusted runtime composition is configured/)).toBeInTheDocument();
     expect(screen.getByText("NOT_CONFIGURED")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Review strategy" })).toBeInTheDocument();
   });
 
+  it("shows the fixed one-shot PAPER order but keeps it locked outside its UTC window", async () => {
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
+      configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "STOPPED", control_state: null,
+      dispatch_gate_open: false, owner_lease_held: false, reason: null,
+      last_error_code: null, strategy_version_id: "a".repeat(64),
+    });
+    vi.mocked(api.getPaperIntegrationTestStatus).mockResolvedValue({
+      configured: true, enabled: true, window_open: false,
+      valid_window_utc: { start: "2026-11-02T14:30:00Z", end: "2026-11-02T21:00:00Z" },
+      symbol: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00",
+      time_in_force: "DAY", regular_trading_hours_only: true, max_notional_usd: "400",
+      strategy_version_id: "a".repeat(64),
+      backtest_attestation: { status: "verified", evaluation_start: "2026-10-30", evaluation_end: "2026-10-30", suggested_warmup_date: "2026-10-29" },
+    });
+    vi.mocked(api.getPaperStrategyCandidates).mockResolvedValue({
+      deployment_mode: "fixed_one_shot_paper_integration",
+      supported_order: { instrument: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00", time_in_force: "DAY" },
+      items: [{
+        strategy_version_id: "a".repeat(64), strategy_id: "paper-aapl-limit-integration-test",
+        source_kind: "python_upload", instrument_ids: ["AAPL"], execution_order_type: "limit",
+        execution_time_in_force: "DAY", position_mode: "explicit_quantity", run_id: "paper-integration-test",
+        backtest_status: "verified", backtest_report_sha256: "b".repeat(64), data_manifest_hash: "c".repeat(64),
+        evaluation_start: "2026-10-30", evaluation_end: "2026-10-30", paper_deployable: true, currently_deployed: true, paper_block_reasons: [],
+      }, {
+        strategy_version_id: "d".repeat(64), strategy_id: "sma-cross-10-30",
+        source_kind: "natural_language_template", instrument_ids: ["AAPL"], execution_order_type: "market",
+        execution_time_in_force: "DAY", position_mode: "target_fraction", run_id: "bt_20261031_130904",
+        backtest_status: "verified", backtest_report_sha256: "e".repeat(64), data_manifest_hash: "f".repeat(64),
+        evaluation_start: "2026-10-30", evaluation_end: "2026-10-30", paper_deployable: false, currently_deployed: false,
+        paper_block_reasons: ["no_trusted_paper_deployment_for_this_version"],
+      }],
+    });
+    renderExecution();
+
+    expect(await screen.findByRole("heading", { name: "Single-order PAPER check" })).toBeInTheDocument();
+    expect(screen.getByText("AAPL · BUY 1 · LMT $400 · DAY · regular hours only")).toBeInTheDocument();
+    expect(screen.getByText(/Frozen version has a verified Backtrader report/)).toBeInTheDocument();
+    expect(await screen.findByText("paper-aapl-limit-integration-test")).toBeInTheDocument();
+    expect(screen.getByText("sma-cross-10-30")).toBeInTheDocument();
+    expect(screen.getByText(/2026-11-02T14:30:00Z/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run the one-shot PAPER order" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Use selected PAPER backtest dates" }));
+    expect(screen.getByLabelText("Warm-up start")).toHaveValue("2026-10-29");
+    expect(screen.getByLabelText("Evaluation end")).toHaveValue("2026-10-30");
+    expect(api.runPaperIntegrationTest).not.toHaveBeenCalled();
+  });
+
+  it("lets an attributable operator select a compatible frozen version without submitting an order", async () => {
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
+      configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "STOPPED", control_state: null,
+      dispatch_gate_open: false, owner_lease_held: false, reason: null,
+      last_error_code: null, strategy_version_id: "a".repeat(64),
+    });
+    vi.mocked(api.getPaperStrategyCandidates).mockResolvedValue({
+      deployment_mode: "fixed_one_shot_paper_integration",
+      supported_order: { instrument: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00", time_in_force: "DAY" },
+      items: [{
+        strategy_version_id: "d".repeat(64), strategy_id: "compatible-python-upload",
+        source_kind: "python_upload", instrument_ids: ["AAPL"], execution_order_type: "limit",
+        execution_time_in_force: "DAY", position_mode: "explicit_quantity", run_id: "bt_compatible",
+        backtest_status: "verified", backtest_report_sha256: "e".repeat(64), data_manifest_hash: "f".repeat(64),
+        evaluation_start: "2026-10-30", evaluation_end: "2026-10-30", paper_deployable: true, currently_deployed: false,
+        currently_deployed: false, paper_block_reasons: [],
+      }],
+    });
+    vi.mocked(api.getPaperIntegrationTestStatus).mockResolvedValue({
+      configured: true, enabled: true, window_open: false,
+      valid_window_utc: { start: "2026-11-02T14:30:00Z", end: "2026-11-02T21:00:00Z" },
+      symbol: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00",
+      time_in_force: "DAY", regular_trading_hours_only: true, max_notional_usd: "400",
+      strategy_version_id: "d".repeat(64),
+    });
+    vi.mocked(api.selectPaperStrategyCandidate).mockResolvedValue({
+      strategy_version_id: "d".repeat(64), backtest_report_sha256: "e".repeat(64),
+      composition_ready: true, deployment_mode: "fixed_one_shot_paper_integration",
+      order_submission_performed: false,
+    });
+    renderExecution();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Use for this PAPER check" }));
+
+    await waitFor(() => expect(api.selectPaperStrategyCandidate).toHaveBeenCalledWith("d".repeat(64)));
+    expect(api.runPaperIntegrationTest).not.toHaveBeenCalled();
+  });
+
+  it("runs the one-shot PAPER route and presents its reconciled activity", async () => {
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
+      configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "STOPPED", control_state: null,
+      dispatch_gate_open: false, owner_lease_held: false, reason: null,
+      last_error_code: null, strategy_version_id: "a".repeat(64),
+    });
+    vi.mocked(api.getPaperIntegrationTestStatus).mockResolvedValue({
+      configured: true, enabled: true, window_open: true,
+      valid_window_utc: { start: "2026-11-02T14:30:00Z", end: "2026-11-02T21:00:00Z" },
+      symbol: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00",
+      time_in_force: "DAY", regular_trading_hours_only: true, max_notional_usd: "400",
+      strategy_version_id: "a".repeat(64),
+      backtest_attestation: { status: "verified", evaluation_start: "2026-10-30", evaluation_end: "2026-10-30" },
+    });
+    const activity = {
+      broker: "IBKR", environment: "paper", control_state: "PAUSED", control_reason: null,
+      history_limit: 10, latest_activity_seq: 22,
+      orders: [{
+        intent_id: "paper-test-intent", created_at: "2026-11-02T15:00:00Z", updated_at: "2026-11-02T15:00:01Z",
+        state: "FILLED", reserved_amount: "400", filled_qty: 1, remaining_qty: 0,
+        average_fill_price: "275.00", broker_order_id: 81, attempt_id: "attempt-paper",
+        intent: { instrument_id: "AAPL", side: "BUY", integer_qty: 1, order_type: "limit", time_in_force: "DAY", reference_price: "400.00" },
+        fills: [{ broker_exec_id: "exec-paper", quantity: 1, price: "275.00", occurred_at: "2026-11-02T15:00:01Z" }], fees: [],
+      }],
+      recovery: { ready_to_reserve: 0, ready_to_send: 0, unresolved_sends: 0, active_orders: 0 },
+      risk: { source: "ledger_reservations_only", reserved_cash: "0", reserved_sell_shares: 0, risk_limits: "unavailable" },
+      positions: { source: "ibkr_reconciled_snapshot", as_of: "2026-11-02T15:00:02Z", positions: [], reason: null },
+    };
+    vi.mocked(api.getPaperExecutionActivity).mockResolvedValue(activity);
+    vi.mocked(api.runPaperIntegrationTest).mockResolvedValue({
+      action: "one_shot_paper_integration_test", strategy_version_id: "a".repeat(64),
+      bar_session_date: "2026-10-30", bar_source: "IBKR PAPER", dispatch_gate_open: false,
+      phase: "READY", control_state: "PAUSED", post_order_reconciliation: "verified",
+      order_observed_within_seconds: 0.5,
+      activity,
+    });
+    renderExecution();
+
+    const runButton = await screen.findByRole("button", { name: "Run the one-shot PAPER order" });
+    expect(runButton).toBeEnabled();
+    fireEvent.click(runButton);
+
+    expect(await screen.findByText(/A fresh broker order and position reconciliation completed/)).toBeInTheDocument();
+    expect(await screen.findByText("BUY 1 AAPL")).toBeInTheDocument();
+    expect(screen.getByText(/1 filled · 0 remaining/)).toBeInTheDocument();
+    expect(api.runPaperIntegrationTest).toHaveBeenCalledTimes(1);
+  });
+
   it("shows persisted PAPER activity while keeping broker positions and risk limits distinct", async () => {
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
+      configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "READY", control_state: "PAUSED",
+      dispatch_gate_open: false, owner_lease_held: true, reason: null, last_error_code: null,
+    });
+    vi.mocked(api.cancelPaperExecutionOrder).mockResolvedValue({ intent_id: "intent-123", state: "CANCEL_PENDING" });
     vi.mocked(api.getPaperExecutionActivity).mockResolvedValue({
       broker: "ibkr",
       environment: "paper",
@@ -137,9 +310,14 @@ describe("Execution page", () => {
     expect(await screen.findByText("Persisted PAPER activity")).toBeInTheDocument();
     expect(screen.getByText("BUY 2 AAPL")).toBeInTheDocument();
     expect(screen.getByText("Order intent-123 · 1 filled · 1 remaining")).toBeInTheDocument();
+    expect(screen.getByText("Broker order ID: 77")).toBeInTheDocument();
+    expect(screen.getByText(/Execution ID: exec-1/)).toBeInTheDocument();
     expect(screen.getByText("Unknown: no fresh authoritative broker snapshot is available.")).toBeInTheDocument();
     expect(screen.getByText("Ledger reservations only; current risk limits are unavailable.")).toBeInTheDocument();
     expect(screen.getByText("Reported fees · unconfirmed: 0.25 USD")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel this PAPER order" }));
+    await waitFor(() => expect(api.cancelPaperExecutionOrder).toHaveBeenCalledWith("intent-123"));
+    expect(await screen.findByText(/Cancellation requested; check the broker status/)).toBeInTheDocument();
   });
 
   it("subscribes after the activity snapshot cursor and refreshes on persisted events", async () => {
@@ -182,10 +360,11 @@ describe("Execution page", () => {
 
   it("explains each missing PAPER composition requirement in actionable language", async () => {
     vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
-      configured: true,
-      runtime_factory_registered: true,
+      configured: false,
+      runtime_factory_registered: false,
       composition_ready: false,
       missing_requirements: [
+        "ibkr_runtime_factory",
         "strategy_session_builder",
         "attributable_control_authorizer",
         "account_reconciliation_facts",
@@ -202,6 +381,7 @@ describe("Execution page", () => {
     renderExecution();
 
     expect(await screen.findByRole("heading", { name: "What is needed to complete PAPER readiness" })).toBeInTheDocument();
+    expect(screen.getByText("A PAPER-only IBKR runtime connected to the shared Gateway account.")).toBeInTheDocument();
     expect(screen.getByText("A session builder that loads the approved, immutable strategy version.")).toBeInTheDocument();
     expect(screen.getByText("An operator authorization linked to an explicit PAPER mandate.")).toBeInTheDocument();
     expect(screen.getByText("Broker account identity, positions, open orders, and reconciliation evidence.")).toBeInTheDocument();
@@ -305,6 +485,56 @@ describe("Execution page", () => {
     await waitFor(() => expect(api.pausePaperExecution).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/Runtime is paused. The dispatch gate is closed./)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pause new orders" })).not.toBeInTheDocument();
+  });
+
+  it("connects a pinned strategy paused, then requires a separate activation", async () => {
+    const versionId = "a".repeat(64);
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
+      configured: true,
+      runtime_factory_registered: true,
+      composition_ready: true,
+      missing_requirements: [],
+      phase: "STOPPED",
+      control_state: null,
+      dispatch_gate_open: false,
+      owner_lease_held: false,
+      reason: null,
+      last_error_code: null,
+      strategy_version_id: versionId,
+    });
+    vi.mocked(api.startPaperExecution).mockResolvedValue({
+      configured: true,
+      runtime_factory_registered: true,
+      composition_ready: true,
+      missing_requirements: [],
+      phase: "READY",
+      control_state: "PAUSED",
+      dispatch_gate_open: false,
+      owner_lease_held: true,
+      reason: "recovered_requires_explicit_activation",
+      last_error_code: null,
+      strategy_version_id: versionId,
+    });
+    vi.mocked(api.activatePaperExecution).mockResolvedValue({
+      configured: true,
+      runtime_factory_registered: true,
+      composition_ready: true,
+      missing_requirements: [],
+      phase: "READY",
+      control_state: "RUNNING",
+      dispatch_gate_open: true,
+      owner_lease_held: true,
+      reason: null,
+      last_error_code: null,
+      strategy_version_id: versionId,
+    });
+
+    renderExecution();
+    fireEvent.click(await screen.findByRole("button", { name: "Connect and reconcile (paused)" }));
+    await waitFor(() => expect(api.startPaperExecution).toHaveBeenCalledWith(versionId));
+    fireEvent.click(await screen.findByRole("button", { name: "Enable PAPER strategy" }));
+    await waitFor(() => expect(api.activatePaperExecution).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("button", { name: "Pause new orders" })).toBeInTheDocument();
   });
 
   it("runs the trusted template and renders the persisted report summary", async () => {
@@ -547,14 +777,17 @@ describe("Execution page", () => {
 
     await waitFor(() => expect(api.previewPythonUploadBacktest).toHaveBeenCalledWith(expect.objectContaining({
       strategy_id: "custom-python-strategy",
-      instrument_id: "AAPL.US",
+      instrument_id: "AAPL",
+      position_quantity: 1,
+      execution_order_type: "limit",
+      limit_price_usd: "400.00",
       strategy_source: expect.stringContaining("def on_event"),
       market_data_csv: expect.stringContaining("session_date,start_at"),
       expected_sessions: [expect.objectContaining({ session_date: "2025-02-03" })],
       slippage_fraction: 0,
       market_data_metadata: expect.objectContaining({
         calendar_id: "us_equity_rth",
-        instrument_id: "AAPL.US",
+        instrument_id: "AAPL",
         adjustment_policy: "caller_declared_unadjusted",
       }),
     })));

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from src.execution.contracts import is_sha256
 from src.execution.paper_execution_manager import PaperExecutionManager, PaperRuntimeScope
@@ -22,6 +23,7 @@ class PaperExecutionComposition:
     manager: PaperExecutionManager
     readiness: PaperExecutionReadiness
     scope: PaperRuntimeScope
+    integration_test_runner: Callable[[Any], dict] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.manager, PaperExecutionManager):
@@ -30,6 +32,8 @@ class PaperExecutionComposition:
             raise TypeError("readiness must be a PaperExecutionReadiness")
         if not isinstance(self.scope, PaperRuntimeScope):
             raise TypeError("scope must be a trusted PaperRuntimeScope")
+        if self.integration_test_runner is not None and not callable(self.integration_test_runner):
+            raise TypeError("integration_test_runner must be callable or None")
         runtime_factory = self.manager.runtime_factory
         strategy_version_id = getattr(runtime_factory, "strategy_version_id", None)
         if not isinstance(strategy_version_id, str) or not is_sha256(strategy_version_id):

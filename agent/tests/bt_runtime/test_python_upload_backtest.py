@@ -20,7 +20,7 @@ from src.execution.event_worker import PYTHON_WORKER_COMPILER_VERSION
 from src.execution.versions import StrategyVersionStore
 
 
-def make_spec():
+def make_spec(*, order_type="market"):
     return StrategySpec.model_validate({
         "schema_version": "1.0",
         "strategy_id": "python_upload_fixture",
@@ -37,7 +37,7 @@ def make_spec():
         "position_policy": {"mode": "explicit_quantity", "long_only": True, "whole_shares": True},
         "execution_policy": {
             "decision": "completed_bar_available", "dispatch": "next_regular_session",
-            "order_type": "market", "time_in_force": "DAY", "outside_rth": False,
+            "order_type": order_type, "time_in_force": "DAY", "outside_rth": False,
             "gap_action": "reject_and_pause", "missed_session_action": "expire_and_pause",
         },
     })
@@ -83,10 +83,10 @@ class RecordingSandbox:
         }})()
 
 
-def prepare_version(tmp_path):
-    spec = make_spec()
+def prepare_version(tmp_path, *, spec=None, source=None):
+    spec = spec or make_spec()
     store = StrategyVersionStore(tmp_path / "versions")
-    source = b"def on_event(event, state):\n    return {\"state\": state, \"order_proposals\": []}\n"
+    source = source or b"def on_event(event, state):\n    return {\"state\": state, \"order_proposals\": []}\n"
     record = store.create_version(
         spec,
         engine_version=f"backtrader/{bt.__version__}",
@@ -147,6 +147,69 @@ def test_python_upload_uses_native_backbroker_orders_and_next_bar_fill(tmp_path)
     assert report.execution_integrity["engine"] == "second Backtrader Cerebro / BackBroker in separate local process"
     assert report.provenance["cost"]["slippage_fraction"] == "0.01"
     assert report.execution_integrity["slippage_fraction"] == 0.01
+
+
+def test_python_upload_backtest_and_independent_replay_preserve_limit_order_policy(tmp_path):
+    spec = make_spec(order_type="limit")
+    source = b"def on_event(event, state):\n    return {\"state\": state, \"order_proposals\": []}\n"
+    spec, versions, version = prepare_version(tmp_path, spec=spec, source=source)
+    fixture = bars()
+    manifest = sma._build_synthetic_manifest(spec, fixture, 1)
+
+    class LimitSandbox(RecordingSandbox):
+        def run_json(self, request):
+            self.requests.append(request)
+            bar = request["event"]["bar"]
+            proposals = (
+                [{
+                    "side": "BUY", "integer_qty": 1, "order_type": "limit",
+                    "time_in_force": "DAY", "limit_price": "10.80", "reason": "bounded entry",
+                }]
+                if bar["session_date"] == "2024-01-04" else []
+            )
+            return type("Result", (), {"response": {
+                "protocol_version": request["protocol_version"],
+                "request_id": request["request_id"],
+                "event_id": request["event_id"],
+                "state": {"submitted": bool(proposals)},
+                "order_proposals": proposals,
+            }})()
+
+    report = run_python_upload_backtest(
+        spec, fixture, manifest, version_id=version.version_id,
+        versions=versions, sandbox=LimitSandbox(), initial_cash=1000,
+    )
+
+    assert report.decision_log == ({
+        "seq": 4,
+        "session_date": "2024-01-04",
+        "side": "BUY",
+        "requested_qty": 1,
+        "reason": "bounded entry",
+        "order_type": "limit",
+        "limit_price": "10.80",
+    },)
+    assert report.orders[0]["order_type"] == "limit"
+    assert report.orders[0]["limit_price"] == 10.8
+    assert report.fills[0]["price"] <= 10.8
+    assert report.final_position["qty"] == 1
+    assert report.provenance["cost"]["slippage_model"] == (
+        "BackBroker percentage slippage with native limit-price matching; capped to bar range"
+    )
+    assert report.execution_integrity["status"] == "verified"
+
+
+def test_python_upload_rejects_proposal_order_type_that_differs_from_frozen_policy(tmp_path):
+    spec = make_spec(order_type="limit")
+    spec, versions, version = prepare_version(tmp_path, spec=spec)
+    fixture = bars()
+    manifest = sma._build_synthetic_manifest(spec, fixture, 1)
+
+    with pytest.raises(PythonStrategyRunError, match="frozen execution policy"):
+        run_python_upload_backtest(
+            spec, fixture, manifest, version_id=version.version_id,
+            versions=versions, sandbox=RecordingSandbox(), initial_cash=1000,
+        )
 
 
 def test_explicit_buy_over_cash_is_not_resized_and_backbroker_margin_replays(tmp_path):

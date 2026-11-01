@@ -241,7 +241,7 @@ def test_documented_farm_status_notifications_are_acknowledged_without_pausing(t
     assert pump._fatal is None
 
 
-@pytest.mark.parametrize("error_code", [1100, 1101, 1102, 1300, 999999])
+@pytest.mark.parametrize("error_code", [1100, 1101, 1102, 1300, 2110, 999999])
 def test_connectivity_and_unknown_errors_pause_for_reconciliation(tmp_path, error_code):
     _, _, events, _, _, pump, _ = _setup(tmp_path)
     latch = Event()
@@ -252,7 +252,7 @@ def test_connectivity_and_unknown_errors_pause_for_reconciliation(tmp_path, erro
         pump.process_one()
 
     assert latch.is_set()
-    if error_code in {1100, 1101, 1102, 1300}:
+    if error_code in {1100, 1101, 1102, 1300, 2110}:
         assert "reconciliation" in str(pump._fatal)
     else:
         assert "unclassified" in str(pump._fatal)

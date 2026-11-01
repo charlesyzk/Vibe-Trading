@@ -53,12 +53,14 @@ def _snapshot(**overrides):
     return value
 
 
-def _hydrate(broker, snapshot=None, *, mapping=None, account_ref="DU123456", environment="paper"):
+def _hydrate(broker, snapshot=None, *, mapping=None, account_ref="DU123456", environment="paper",
+             allow_unreported_usd_cash=False):
     return broker.hydrate_reconciled_account_snapshot(
         _snapshot() if snapshot is None else snapshot,
         account_ref=account_ref,
         environment=environment,
         data_by_con_id={111: _Feed()} if mapping is None else mapping,
+        allow_unreported_usd_cash=allow_unreported_usd_cash,
     )
 
 
@@ -74,8 +76,31 @@ def test_hydrates_cash_and_positions_from_exact_reconciled_paper_snapshot():
     position = broker.getposition(feed)
     assert position.size == 7
     assert position.price == pytest.approx(50.25)
+    assert broker.cash_is_authoritative is True
     with pytest.raises(RuntimeError, match="market value is unavailable"):
         broker.getvalue()
+
+
+def test_foreign_currency_summary_can_only_use_non_authoritative_cash_for_explicit_broker_limit_scope():
+    summary = [
+        {"snapshot_id": 43, "account": "DU123456", "tag": tag, "currency": "HKD", "value": value}
+        for tag, value in (("NetLiquidation", "12000"), ("TotalCashValue", "8500"), ("AvailableFunds", "8000"))
+    ]
+    snapshot = _snapshot(account_summary=summary, positions=[])
+    broker = PortBroker(_Port(), initial_cash=321)
+    with pytest.raises(ValueError, match="USD cash facts"):
+        _hydrate(broker, snapshot, mapping={})
+    assert broker.getcash() == 321
+
+    limited = PortBroker(_Port(), initial_cash=321)
+    _hydrate(limited, snapshot, mapping={}, allow_unreported_usd_cash=True)
+    assert limited.getcash() == 0
+    assert limited.startingcash == 0
+    assert limited.cash_is_authoritative is False
+
+    with_positions = _snapshot(account_summary=summary)
+    with pytest.raises(ValueError, match="USD cash facts"):
+        _hydrate(PortBroker(_Port()), with_positions, allow_unreported_usd_cash=True)
 
 
 @pytest.mark.parametrize(

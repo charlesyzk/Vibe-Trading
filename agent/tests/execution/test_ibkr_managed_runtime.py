@@ -19,6 +19,10 @@ from src.execution.ibkr_callback_pump import (
 )
 from src.execution.ibkr_managed_runtime import IbkrManagedPaperRuntime, ManagedRuntimeError
 from src.execution.ibkr_order_ids import IbkrOrderIdAllocator
+from src.execution.ibkr_paper_risk_facts import (
+    IbkrManagedRiskSnapshotSource,
+    IbkrPaperRiskFactsError,
+)
 from src.execution.ibkr_reconciliation import (
     IbkrReconciliationCoordinator,
     IbkrRecoveryReconciler,
@@ -98,6 +102,7 @@ def _raw(kind, **payload):
 
 
 def _build_runtime(tmp_path, *, managed_account="paper-fixture", gateway_port=4002):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "runtime.sqlite"
     ledger = SQLiteOrderLedger(path)
     index = BrokerOrderIndex(path)
@@ -163,6 +168,7 @@ def _build_runtime(tmp_path, *, managed_account="paper-fixture", gateway_port=40
 
 def test_runtime_construction_is_offline_then_reconciles_to_paused_before_activation(tmp_path):
     runtime, process, service, allocator, events = _build_runtime(tmp_path)
+    assert 1 <= runtime.snapshot_id_factory() <= (1 << 31) - 1
     assert process.start_calls == []
     assert not process.connected
     with pytest.raises(ManagedRuntimeError, match="only while runtime is PAUSED"):
@@ -224,6 +230,81 @@ def test_runtime_construction_is_offline_then_reconciles_to_paused_before_activa
     assert service.lease_held is False
     with pytest.raises(ManagedRuntimeError, match="only while runtime is PAUSED"):
         runtime.latest_reconciled_snapshot()
+    allocator.close()
+
+
+def test_runtime_refreshes_fresh_reconciled_risk_snapshot_while_running(tmp_path):
+    runtime, process, service, allocator, events = _build_runtime(tmp_path)
+    snapshot_ids = iter((1900000001, 1900000002, 1900000003))
+    runtime.snapshot_id_factory = lambda: next(snapshot_ids)
+    _start_runtime(runtime, process, events)
+    runtime.activate()
+
+    snapshot = runtime.refresh_risk_snapshot()
+
+    assert service.state()[0] is ExecutionControlState.RUNNING
+    assert snapshot["snapshot_id"] == 1900000002
+    assert snapshot["capture_complete"] is True
+    assert snapshot["reconciled"] is True
+    assert snapshot["reconciliation_result"]["purpose"] == "risk_refresh"
+    assert allocator.allocation_ready is True
+    runtime.pause(reason="risk refresh test complete")
+    with pytest.raises(ManagedRuntimeError, match="current PAPER reconciliation proof"):
+        runtime.latest_reconciled_activity_snapshot()
+    paused_snapshot = runtime.refresh_risk_snapshot()
+    assert paused_snapshot["snapshot_id"] == 1900000003
+    assert runtime.latest_reconciled_activity_snapshot()["snapshot_id"] == 1900000003
+    assert runtime.stop() is True
+    allocator.close()
+
+
+def test_risk_snapshot_source_rebinds_only_after_previous_runtime_is_stopped(tmp_path):
+    runtime, _process, _service, allocator, _events = _build_runtime(tmp_path)
+    source = IbkrManagedRiskSnapshotSource(account_ref="paper-fixture")
+    with pytest.raises(IbkrPaperRiskFactsError, match="not bound"):
+        source()
+    source.bind_runtime(runtime)
+    expected = {"reconciled": True}
+    runtime.refresh_risk_snapshot = lambda: expected
+    assert source() is expected
+    other_runtime, _other_process, _other_service, other_allocator, _other_events = _build_runtime(
+        tmp_path / "other", managed_account="other-account",
+    )
+    with pytest.raises(ValueError, match="still bound to an active runtime"):
+        runtime.service.begin_recovery()
+        source.bind_runtime(other_runtime)
+    assert runtime.service.stop() is True
+    # The runtime process wrapper preserves its historical PID after a
+    # successful wait; `_process_closed` is the authoritative shutdown proof.
+    runtime.process._process = SimpleNamespace(pid=123)
+    runtime._process_closed = True
+    source.bind_runtime(other_runtime)
+    rebound = {"reconciled": True, "epoch": 2}
+    other_runtime.refresh_risk_snapshot = lambda: rebound
+    assert source() is rebound
+    allocator.close()
+    other_allocator.close()
+
+
+def test_runtime_rejects_snapshot_id_outside_ibkr_request_range_before_broker_snapshot(tmp_path):
+    runtime, process, service, allocator, events = _build_runtime(tmp_path)
+    runtime.snapshot_id_factory = lambda: 1 << 31
+    original_request = process.request
+
+    def request(command, **payload):
+        result = original_request(command, **payload)
+        if command == "start":
+            events.put(_raw("next_valid_id", order_id=1))
+            events.put(_raw("managed_accounts", accounts="paper-fixture"))
+        return result
+
+    process.request = request
+    with pytest.raises(ManagedRuntimeError, match="positive 32-bit IBKR request id"):
+        runtime.start_paused()
+
+    assert process.reconciliation_calls == []
+    assert service.state()[0] is ExecutionControlState.PAUSED
+    assert runtime.stop() is True
     allocator.close()
 
 

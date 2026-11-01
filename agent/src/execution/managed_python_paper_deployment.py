@@ -61,23 +61,35 @@ class ManagedPythonPaperDeploymentFactory:
             raise TypeError("scope must be a PaperRuntimeScope")
 
         runtime = self.runtime_factory(scope)
-        self._validate_runtime(runtime, scope)
+        try:
+            self._validate_runtime(runtime, scope)
 
-        # Session construction installs its callback sink/deferred ACK before
-        # runtime startup. Calling start_paused before this point would lose
-        # the safe callback staging window.
-        session = self.session_builder(runtime, scope)
-        self._validate_session(session, runtime, scope)
-        if self.strategy_version_id is not None:
-            record = session.version_store.get_version(session.version_id)
-            if (
-                session.version_id != self.strategy_version_id
-                or record.version_id != self.strategy_version_id
-            ):
-                raise ManagedPythonPaperDeploymentError(
-                    "session does not match the factory-pinned immutable strategy version"
-                )
-        return session
+            # Session construction installs its callback sink/deferred ACK before
+            # runtime startup. Calling start_paused before this point would lose
+            # the safe callback staging window.
+            session = self.session_builder(runtime, scope)
+            self._validate_session(session, runtime, scope)
+            if self.strategy_version_id is not None:
+                record = session.version_store.get_version(session.version_id)
+                if (
+                    session.version_id != self.strategy_version_id
+                    or record.version_id != self.strategy_version_id
+                ):
+                    raise ManagedPythonPaperDeploymentError(
+                        "session does not match the factory-pinned immutable strategy version"
+                    )
+            return session
+        except BaseException as exc:
+            # The manager cannot clean a runtime when this factory raises
+            # before returning its session. Release construction-only resources
+            # here, but never tear down a process or lease that unexpectedly
+            # started. Preserve the original composition failure for diagnosis.
+            if isinstance(runtime, IbkrManagedPaperRuntime):
+                try:
+                    runtime.discard_unstarted()
+                except Exception as cleanup_error:
+                    exc.add_note(f"unstarted runtime cleanup also failed: {cleanup_error}")
+            raise
 
     @staticmethod
     def _validate_runtime(runtime: IbkrManagedPaperRuntime, scope: PaperRuntimeScope) -> None:

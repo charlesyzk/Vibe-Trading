@@ -32,6 +32,19 @@ MAX_REPLAY_BARS = 5_000
 MAX_REPLAY_REASON_CHARS = 1_024
 MAX_REPLAY_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_REPLAY_RESPONSE_BYTES = 8 * 1024 * 1024
+_OPEN_BACKTEST_ORDER_STATES = {"Created", "Submitted", "Accepted"}
+
+
+def normalize_unfilled_orders_at_data_end(order_rows: dict[int, dict[str, Any]]) -> None:
+    """Give unfilled orders left beyond the final simulated session one stable state."""
+    for row in order_rows.values():
+        if (
+            row.get("status") in _OPEN_BACKTEST_ORDER_STATES
+            and row.get("filled_qty") == 0
+            and row.get("remaining_qty", 0) > 0
+        ):
+            row["status"] = "OPEN_AT_DATA_END"
+            row["status_history"] = ["OPEN_AT_DATA_END"]
 
 
 def _run_replay_worker(
@@ -225,7 +238,9 @@ def replay_backtrader_order_log(
     by_seq: dict[int, dict[str, Any]] = {}
     last_seq = 0
     for row in decision_log:
-        if set(row) != {"seq", "session_date", "side", "requested_qty", "reason"}:
+        legacy_fields = {"seq", "session_date", "side", "requested_qty", "reason"}
+        execution_fields = legacy_fields | {"order_type", "limit_price"}
+        if not isinstance(row, dict) or frozenset(row) not in {frozenset(legacy_fields), frozenset(execution_fields)}:
             raise ReportReplayMismatch("decision log row has an invalid shape")
         seq = row["seq"]
         if type(seq) is not int or not 1 <= seq <= len(records) or seq <= last_seq:
@@ -236,7 +251,22 @@ def replay_backtrader_order_log(
             raise ReportReplayMismatch("decision log date does not match its verified bar sequence")
         if row["side"] not in {"BUY", "SELL"} or type(row["requested_qty"]) is not int or row["requested_qty"] <= 0:
             raise ReportReplayMismatch("decision log side or explicit quantity is invalid")
-        by_seq[seq] = dict(row)
+        normalized = dict(row)
+        normalized.setdefault("order_type", "market")
+        normalized.setdefault("limit_price", None)
+        if normalized["order_type"] not in {"market", "limit"}:
+            raise ReportReplayMismatch("decision log order type is invalid")
+        if normalized["order_type"] == "limit":
+            try:
+                limit_price = Decimal(str(normalized["limit_price"]))
+            except Exception as exc:
+                raise ReportReplayMismatch("decision log limit price is invalid") from exc
+            if not limit_price.is_finite() or limit_price <= 0:
+                raise ReportReplayMismatch("decision log limit price is invalid")
+            normalized["limit_price"] = str(limit_price)
+        elif normalized["limit_price"] is not None:
+            raise ReportReplayMismatch("market decision cannot have a limit price")
+        by_seq[seq] = normalized
 
     feed_input_hash = canonical_sha256({
         "bars": [
@@ -260,6 +290,7 @@ def replay_backtrader_order_log(
     cerebro.adddata(bt.feeds.PandasData(dataname=bars, timeframe=bt.TimeFrame.Days))
     cerebro.addstrategy(_make_replay_strategy(records=records, decisions=by_seq))
     strategy = cerebro.run()[0]
+    normalize_unfilled_orders_at_data_end(strategy.order_rows)
 
     stable_refs = {ref: index for index, ref in enumerate(strategy.order_rows, start=1)}
     orders = tuple(_stable({**row, "order_ref": stable_refs[ref]}) for ref, row in strategy.order_rows.items())
@@ -356,7 +387,16 @@ def verify_backtest_report_replay(
     cost = provenance.get("cost") if isinstance(provenance, dict) else None
     if not isinstance(cost, dict) or not _matches(cost.get("commission_rate"), str(commission_rate)):
         raise ReportReplayMismatch("report commission declaration does not match replay input")
-    if cost.get("slippage_model") != "BackBroker percentage slippage at next-bar market open; capped to bar range":
+    has_limit_orders = any(
+        isinstance(row, dict) and row.get("order_type", "market") == "limit"
+        for row in decisions
+    )
+    expected_slippage_model = (
+        "BackBroker percentage slippage with native limit-price matching; capped to bar range"
+        if has_limit_orders
+        else "BackBroker percentage slippage at next-bar market open; capped to bar range"
+    )
+    if cost.get("slippage_model") != expected_slippage_model:
         raise ReportReplayMismatch("report slippage declaration is not the replayed model")
     if not _matches(cost.get("slippage_fraction"), str(slippage_fraction)):
         raise ReportReplayMismatch("report slippage fraction does not match replay input")
@@ -603,13 +643,28 @@ def _make_replay_strategy(*, records: tuple[Bar, ...], decisions: dict[int, dict
             quantity = decision["requested_qty"]
             if decision["side"] == "SELL" and quantity > int(self.position.size):
                 raise ReportReplayMismatch("replayed sell decision exceeds the long position")
-            order = self.buy(size=quantity) if decision["side"] == "BUY" else self.sell(size=quantity)
+            submit = self.buy if decision["side"] == "BUY" else self.sell
+            if decision["order_type"] == "limit":
+                order = submit(
+                    size=quantity,
+                    exectype=bt.Order.Limit,
+                    price=float(decision["limit_price"]),
+                    valid=(
+                        records[self.seq].end_at
+                        if self.seq < len(records)
+                        else record.end_at + pd.Timedelta(days=1).to_pytimedelta()
+                    ),
+                )
+            else:
+                order = submit(size=quantity)
             self.pending_order = order
             self.order_rows[order.ref] = {
                 "order_ref": order.ref,
                 "side": decision["side"],
                 "requested_qty": quantity,
                 "reason": decision["reason"],
+                "order_type": decision["order_type"],
+                "limit_price": float(decision["limit_price"]) if decision["limit_price"] is not None else None,
                 "status": "Created",
                 "status_history": ["Created"],
                 "decision_date": record.session_date.isoformat(),
@@ -684,7 +739,7 @@ def _execution_order_projection(value: Any, *, strict: bool = False) -> Any:
         # these fields, but both entrypoints share the same closed row schema.
         allowed_fields = {
             *fields, "reason", "sizing_reason", "target_shares",
-            "sizing_requested_qty", "accepted_qty",
+            "sizing_requested_qty", "accepted_qty", "order_type", "limit_price",
         }
         unknown_fields = row.keys() - allowed_fields
         if strict and unknown_fields:
@@ -693,6 +748,9 @@ def _execution_order_projection(value: Any, *, strict: bool = False) -> Any:
                 + ", ".join(sorted(unknown_fields))
             )
         item = {field: row[field] for field in fields if field in row}
+        if row.get("order_type", "market") == "limit" or row.get("limit_price") is not None:
+            item["order_type"] = row.get("order_type")
+            item["limit_price"] = row.get("limit_price")
         # Backtrader's synthetic Created state is visible in the trusted
         # template report but not consistently emitted for worker decisions;
         # compare callback transitions, which begin at Submitted.

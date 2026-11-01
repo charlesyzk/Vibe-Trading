@@ -21,6 +21,7 @@ import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, Generator, List, Literal, Optional, Tuple
 
@@ -194,6 +195,10 @@ class PythonUploadBacktestRequest(BaseModel):
     market_data_csv: str = Field(min_length=1, max_length=64 * 1024 * 1024)
     market_data_metadata: Dict[str, Any]
     expected_sessions: List[PythonUploadSessionRequest] = Field(min_length=1, max_length=100_000)
+    ibkr_import_token: Optional[str] = Field(default=None, min_length=32, max_length=128)
+    position_quantity: int = Field(default=1, strict=True, ge=1, le=100_000)
+    execution_order_type: Literal["market", "limit"] = "market"
+    limit_price_usd: Optional[Decimal] = None
     initial_cash: float = Field(default=100_000, gt=0, allow_inf_nan=False)
     commission_rate: float = Field(default=0.001, ge=0, le=1, allow_inf_nan=False)
     slippage_fraction: float = Field(default=0.0, ge=0, le=0.25, allow_inf_nan=False)
@@ -224,6 +229,21 @@ class PythonUploadBacktestRequest(BaseModel):
             raise ValueError("market-data CSV exceeds 64 MiB")
         return value
 
+    @field_validator("limit_price_usd")
+    @classmethod
+    def finite_positive_limit_price(cls, value: Optional[Decimal]) -> Optional[Decimal]:
+        if value is not None and (not value.is_finite() or value <= 0):
+            raise ValueError("limit_price_usd must be finite and positive")
+        return value
+
+    @model_validator(mode="after")
+    def validate_execution_parameters(self) -> "PythonUploadBacktestRequest":
+        if self.execution_order_type == "limit" and self.limit_price_usd is None:
+            raise ValueError("limit_price_usd is required when execution_order_type is limit")
+        if self.execution_order_type == "market" and self.limit_price_usd is not None:
+            raise ValueError("limit_price_usd is only valid for limit execution")
+        return self
+
 
 class PythonUploadBacktestConfirmationRequest(BaseModel):
     """Confirmation identity; market data is loaded from the preview token."""
@@ -233,6 +253,9 @@ class PythonUploadBacktestConfirmationRequest(BaseModel):
     strategy_id: str = Field(min_length=1, max_length=64)
     instrument_id: str = Field(min_length=1, max_length=64)
     strategy_source: str = Field(min_length=1, max_length=262_144)
+    position_quantity: int = Field(default=1, strict=True, ge=1, le=100_000)
+    execution_order_type: Literal["market", "limit"] = "market"
+    limit_price_usd: Optional[Decimal] = None
     initial_cash: float = Field(default=100_000, gt=0, allow_inf_nan=False)
     commission_rate: float = Field(default=0.001, ge=0, le=1, allow_inf_nan=False)
     slippage_fraction: float = Field(default=0.0, ge=0, le=0.25, allow_inf_nan=False)
@@ -266,6 +289,21 @@ class PythonUploadBacktestConfirmationRequest(BaseModel):
         if value is not None and len(value.encode("utf-8")) > 64 * 1024 * 1024:
             raise ValueError("market-data CSV exceeds 64 MiB")
         return value
+
+    @field_validator("limit_price_usd")
+    @classmethod
+    def finite_positive_limit_price(cls, value: Optional[Decimal]) -> Optional[Decimal]:
+        if value is not None and (not value.is_finite() or value <= 0):
+            raise ValueError("limit_price_usd must be finite and positive")
+        return value
+
+    @model_validator(mode="after")
+    def validate_execution_parameters(self) -> "PythonUploadBacktestConfirmationRequest":
+        if self.execution_order_type == "limit" and self.limit_price_usd is None:
+            raise ValueError("limit_price_usd is required when execution_order_type is limit")
+        if self.execution_order_type == "market" and self.limit_price_usd is not None:
+            raise ValueError("limit_price_usd is only valid for limit execution")
+        return self
 
 
 def _parse_trusted_sma_description(value: str) -> Tuple[int, int]:
@@ -1317,19 +1355,36 @@ def register_runs_routes(
             "strategy_id": request.strategy_id,
             "instrument_id": request.instrument_id,
             "strategy_source": request.strategy_source,
-            "initial_cash": request.initial_cash,
-            "commission_rate": request.commission_rate,
-            "slippage_fraction": request.slippage_fraction,
+            "position_quantity": int(request.position_quantity),
+            "execution_order_type": request.execution_order_type,
+            "limit_price_usd": str(request.limit_price_usd) if request.limit_price_usd is not None else None,
+            # Pydantic does not coerce an unvalidated default value, so a
+            # preview model's 100000.0 and a confirmation model's 100000 can
+            # otherwise hash differently even though the API parameters match.
+            "initial_cash": float(request.initial_cash),
+            "commission_rate": float(request.commission_rate),
+            "slippage_fraction": float(request.slippage_fraction),
         }
         encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _python_upload_snapshot_for_request(request: PythonUploadBacktestRequest) -> Dict[str, Any]:
+        return _python_upload_snapshot(
+            request.market_data_csv,
+            request.market_data_metadata,
+            [item.model_dump(mode="json") for item in request.expected_sessions],
+        )
+
+    def _python_upload_snapshot(
+        market_data_csv: str,
+        market_data_metadata: Dict[str, Any],
+        expected_sessions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         snapshot: Dict[str, Any] = {
             "schema_version": "python-upload-market-snapshot/1",
-            "market_data_csv": request.market_data_csv,
-            "market_data_metadata": request.market_data_metadata,
-            "expected_sessions": [item.model_dump(mode="json") for item in request.expected_sessions],
+            "market_data_csv": market_data_csv,
+            "market_data_metadata": market_data_metadata,
+            "expected_sessions": expected_sessions,
         }
         encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         encoded_bytes = encoded.encode("utf-8")
@@ -1339,15 +1394,19 @@ def register_runs_routes(
         return snapshot
 
     def _validated_python_upload_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        if set(snapshot) != {
+        if set(snapshot) not in ({
             "schema_version", "market_data_csv", "market_data_metadata", "expected_sessions", "snapshot_sha256",
-        }:
+        }, {
+            "schema_version", "market_data_csv", "market_data_metadata", "expected_sessions", "snapshot_sha256",
+            "ibkr_paper_attestation",
+        }):
             raise ValueError("Python upload preview snapshot fields are invalid")
         if snapshot.get("schema_version") != "python-upload-market-snapshot/1":
             raise ValueError("Python upload preview snapshot has an unsupported schema")
         supplied_hash = snapshot.get("snapshot_sha256")
         payload = {key: value for key, value in snapshot.items() if key != "snapshot_sha256"}
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        integrity_payload = {key: value for key, value in payload.items() if key != "ibkr_paper_attestation"}
+        encoded = json.dumps(integrity_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         if not isinstance(supplied_hash, str) or hashlib.sha256(encoded.encode("utf-8")).hexdigest() != supplied_hash:
             raise ValueError("Python upload preview snapshot integrity check failed")
         if not isinstance(payload.get("market_data_csv"), str) or not isinstance(payload.get("market_data_metadata"), dict):
@@ -1355,6 +1414,38 @@ def register_runs_routes(
         if not isinstance(payload.get("expected_sessions"), list):
             raise ValueError("Python upload preview schedule is incomplete")
         return payload
+
+    def _verified_ibkr_paper_import(request: PythonUploadBacktestRequest) -> Optional[Dict[str, Any]]:
+        """Resolve the short-lived server-issued proof for an exact PAPER data snapshot."""
+        if not request.ibkr_import_token:
+            return None
+        requested_snapshot = _python_upload_snapshot_for_request(request)
+        stored = _load_preview_market_snapshot(
+            request.ibkr_import_token,
+            requested_snapshot["snapshot_sha256"],
+        )
+        if not isinstance(stored, dict):
+            raise ValueError("IBKR PAPER data proof is missing, expired, or does not match the uploaded bars")
+        try:
+            stored_payload = _validated_python_upload_snapshot(stored)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("IBKR PAPER data proof failed integrity validation") from exc
+        stored_payload.pop("ibkr_paper_attestation", None)
+        if stored_payload != {key: value for key, value in requested_snapshot.items() if key != "snapshot_sha256"}:
+            raise ValueError("IBKR PAPER data proof does not match the uploaded bars or session schedule")
+        attestation = stored.get("ibkr_paper_attestation")
+        if not isinstance(attestation, dict) or not (
+            attestation.get("schema_version") == "ibkr-paper-import-attestation/1"
+            and attestation.get("profile_id") == "ibkr-paper-local"
+            and attestation.get("environment") == "paper"
+            and attestation.get("instrument_id") == request.instrument_id
+            and attestation.get("symbol") == str((request.market_data_metadata.get("download_parameters") or {}).get("qualified_contract", {}).get("symbol", "")).upper()
+            and attestation.get("csv_sha256") == hashlib.sha256(request.market_data_csv.encode("utf-8")).hexdigest()
+            and attestation.get("calendar_schedule_sha256") == request.market_data_metadata.get("calendar_schedule_sha256")
+            and attestation.get("snapshot_sha256") == requested_snapshot["snapshot_sha256"]
+        ):
+            raise ValueError("IBKR PAPER data proof is invalid for this instrument or snapshot")
+        return attestation
 
     def _issue_preview_token(
         review_hash: str,
@@ -1575,14 +1666,20 @@ def register_runs_routes(
             "instrument_ids": [request.instrument_id],
             "bar_policy": {
                 "timeframe": "1d", "session": "regular", "completed_only": True,
-                "calendar_id": metadata.calendar_id, "timezone": metadata.timezone,
+                # The host validates and pins the external XNYS schedule above;
+                # strategy execution uses the runtime's stable calendar key.
+                "calendar_id": "us_equity_rth", "timezone": metadata.timezone,
             },
-            "parameters": {},
             "position_policy": {"mode": "explicit_quantity", "long_only": True, "whole_shares": True},
             "execution_policy": {
                 "decision": "completed_bar_available", "dispatch": "next_regular_session",
-                "order_type": "market", "time_in_force": "DAY", "outside_rth": False,
+                "order_type": request.execution_order_type, "time_in_force": "DAY", "outside_rth": False,
                 "gap_action": "reject_and_pause", "missed_session_action": "expire_and_pause",
+            },
+            "parameters": {
+                "quantity": request.position_quantity,
+                "order_type": request.execution_order_type,
+                **({"limit_price_usd": str(request.limit_price_usd)} if request.limit_price_usd is not None else {}),
             },
         })
         engine_version = f"backtrader/{bt.__version__}"
@@ -1951,6 +2048,49 @@ def register_runs_routes(
                 "evaluation_end": request.evaluation_end.isoformat(),
                 "download_parameters": fetched.provenance,
             }
+            ibkr_import_token = None
+            if request.profile_id == "ibkr-paper-local":
+                provenance = fetched.provenance
+                contract = provenance.get("qualified_contract") if isinstance(provenance, dict) else None
+                if not (
+                    provenance.get("profile_id") == "ibkr-paper-local"
+                    and provenance.get("environment") == "paper"
+                    and provenance.get("actual_loader_identity") == "ibkr-local-tws-api"
+                    and isinstance(contract, dict)
+                    and str(contract.get("symbol", "")).upper() == request.symbol
+                    and str(contract.get("sec_type", "")).upper() == "STK"
+                    and str(contract.get("currency", "")).upper() == "USD"
+                    and type(contract.get("con_id")) is int
+                    and contract.get("con_id") > 0
+                ):
+                    raise ValueError("IBKR PAPER import did not return a verified read-only PAPER contract")
+                normalized_sessions = [
+                    PythonUploadSessionRequest.model_validate(item).model_dump(mode="json")
+                    for item in expected_sessions
+                ]
+                frozen_market_snapshot = _python_upload_snapshot(
+                    market_data_csv, metadata, normalized_sessions,
+                )
+                attestation = {
+                    "schema_version": "ibkr-paper-import-attestation/1",
+                    "profile_id": "ibkr-paper-local",
+                    "environment": "paper",
+                    "symbol": request.symbol,
+                    "instrument_id": request.instrument_id,
+                    "con_id": contract["con_id"],
+                    "retrieved_at": provenance["retrieved_at"],
+                    "csv_sha256": hashlib.sha256(market_data_csv.encode("utf-8")).hexdigest(),
+                    "calendar_schedule_sha256": schedule.sha256,
+                    "snapshot_sha256": frozen_market_snapshot["snapshot_sha256"],
+                }
+                attestation_hash = hashlib.sha256(json.dumps(
+                    attestation, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")).hexdigest()
+                ibkr_import_token = _issue_preview_token(
+                    attestation_hash,
+                    request_hash=frozen_market_snapshot["snapshot_sha256"],
+                    market_snapshot={**frozen_market_snapshot, "ibkr_paper_attestation": attestation},
+                )
             return {
                 "supported": True,
                 "symbol": request.symbol,
@@ -1958,6 +2098,7 @@ def register_runs_routes(
                 "market_data_csv": market_data_csv,
                 "market_data_metadata": metadata,
                 "expected_sessions": expected_sessions,
+                "ibkr_import_token": ibkr_import_token,
                 "provenance": fetched.provenance,
                 "warnings": [
                     "IBKR local API profile is asserted read-only; fetched data is frozen at the subsequent upload preview.",
@@ -1973,10 +2114,36 @@ def register_runs_routes(
     async def preview_python_upload_backtest(request: PythonUploadBacktestRequest):
         """Validate source and imported data, then bind a short-lived confirmation token."""
         image = os.environ.get("VIBE_PYTHON_WORKER_IMAGE", "").strip()
+        import_token_to_consume = request.ibkr_import_token
         try:
+            paper_import_attestation = _verified_ibkr_paper_import(request)
+            # This reserved manifest marker is written only after resolving
+            # the server-side PAPER fetch token against the exact CSV/schedule.
+            metadata_data = dict(request.market_data_metadata)
+            download_parameters = dict(metadata_data.get("download_parameters") or {})
+            download_parameters.pop("application_ibkr_paper_import_attestation", None)
+            if paper_import_attestation is not None:
+                metadata_data["provider"] = "IBKR PAPER Gateway host-observed import"
+                download_parameters["application_ibkr_paper_import_attestation"] = paper_import_attestation
+            metadata_data["download_parameters"] = download_parameters
+            request = request.model_copy(update={
+                "market_data_metadata": metadata_data,
+                "ibkr_import_token": None,
+            })
             prepared = _prepare_python_upload(request, worker_image=image or None)
             worker_configured = prepared["worker_image"] is not None
             frozen_upload_snapshot = _python_upload_snapshot_for_request(request) if worker_configured else None
+            if worker_configured and paper_import_attestation is not None:
+                assert frozen_upload_snapshot is not None
+                attestation_hash = hashlib.sha256(json.dumps(
+                    paper_import_attestation, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")).hexdigest()
+                if not import_token_to_consume or not _consume_preview_token(
+                    import_token_to_consume, attestation_hash,
+                ):
+                    raise ValueError("IBKR PAPER data proof was already used or expired; fetch bars again")
+                frozen_upload_snapshot["ibkr_paper_attestation"] = paper_import_attestation
         except (ValueError, TypeError) as exc:
             return {"supported": False, "reason": str(exc)}
         token = None
@@ -1990,6 +2157,9 @@ def register_runs_routes(
                         strategy_id=request.strategy_id,
                         instrument_id=request.instrument_id,
                         strategy_source=request.strategy_source,
+                        position_quantity=request.position_quantity,
+                        execution_order_type=request.execution_order_type,
+                        limit_price_usd=request.limit_price_usd,
                         initial_cash=request.initial_cash,
                         commission_rate=request.commission_rate,
                         slippage_fraction=request.slippage_fraction,
@@ -2029,11 +2199,20 @@ def register_runs_routes(
                 "initial_cash": request.initial_cash,
                 "commission_rate": request.commission_rate,
                 "slippage_fraction": request.slippage_fraction,
+                "position_quantity": request.position_quantity,
+                "execution_order_type": request.execution_order_type,
+                "limit_price_usd": str(request.limit_price_usd) if request.limit_price_usd is not None else None,
                 "data_authenticity": manifest.quality_report.get("provider_attestation", "not_attested"),
                 "adjustment_attestation": manifest.quality_report.get("adjustment_attestation", "not_attested"),
+                "ibkr_paper_import_attested": paper_import_attestation is not None,
             },
-            "warnings": [
-                "Provider, calendar and adjustment labels are caller-declared and are not externally authenticated.",
+            "warnings": (
+                [
+                    "IBKR PAPER data was fetched through the selected local read-only profile and bound to this exact snapshot; historical publication timing and adjustment semantics remain unverified.",
+                ] if paper_import_attestation is not None else [
+                    "Provider and adjustment labels are caller-declared; this report cannot qualify for PAPER deployment without a server-verified IBKR PAPER import.",
+                ]
+            ) + [
                 "This confirmation authorizes an offline backtest only; it does not authorize broker access or orders.",
             ] + ([] if worker_configured else ["The isolated Python worker image is not configured; this upload cannot run yet."]),
         }
@@ -2058,6 +2237,9 @@ def register_runs_routes(
                 "strategy_id": request.strategy_id,
                 "instrument_id": request.instrument_id,
                 "strategy_source": request.strategy_source,
+                "position_quantity": request.position_quantity,
+                "execution_order_type": request.execution_order_type,
+                "limit_price_usd": request.limit_price_usd,
                 "initial_cash": request.initial_cash,
                 "commission_rate": request.commission_rate,
                 "slippage_fraction": request.slippage_fraction,
@@ -2106,7 +2288,11 @@ def register_runs_routes(
             "initial_cash": request.initial_cash,
             "commission_rate": request.commission_rate,
             "slippage_fraction": request.slippage_fraction,
+            "position_quantity": request.position_quantity,
+            "execution_order_type": request.execution_order_type,
+            "limit_price_usd": str(request.limit_price_usd) if request.limit_price_usd is not None else None,
             "execution_report_integrity_schema": REPORT_INTEGRITY_SCHEMA,
+            "ibkr_paper_import_attestation": frozen_snapshot.get("ibkr_paper_attestation"),
         }, sort_keys=True), encoding="utf-8")
         (run_dir / "req.json").write_text(json.dumps({
             "prompt": f"Python upload backtest: {request.strategy_id} ({request.instrument_id})",

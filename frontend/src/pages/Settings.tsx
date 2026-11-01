@@ -424,7 +424,7 @@ export function Settings() {
           <h1 className="text-2xl font-semibold tracking-tight">{t("settings.title")}</h1>
           <p className="max-w-3xl text-sm text-muted-foreground">{t("settings.subtitle")}</p>
         </div>
-        {!isDesktop && localApiAccessSection}
+        {localApiAccessSection}
         {/* QVERIS-INTEGRATION */}
         <QVerisSettings />
         <div className="flex min-h-32 items-center justify-center rounded-lg border bg-card p-5 text-sm text-muted-foreground">
@@ -469,7 +469,7 @@ export function Settings() {
         <p className="max-w-3xl text-sm text-muted-foreground">{t("settings.subtitle")}</p>
       </div>
 
-      {!isDesktop && localApiAccessSection}
+      {localApiAccessSection}
 
       {/* QVERIS-INTEGRATION */}
       <QVerisSettings />

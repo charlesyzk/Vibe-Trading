@@ -10,6 +10,7 @@ import queue
 import secrets
 import subprocess
 import threading
+from decimal import Decimal, InvalidOperation
 from typing import Any, BinaryIO, Callable, Mapping
 
 PROTOCOL_VERSION = 1
@@ -78,7 +79,7 @@ def validate_command(command: str, payload: dict[str, Any]) -> None:
     if command == "place_order":
         contract, order = payload["contract"], payload["order"]
         contract_fields = {"con_id", "symbol", "security_type", "exchange", "primary_exchange", "currency"}
-        order_fields = {"action", "quantity", "order_type", "time_in_force", "account_ref", "client_order_id", "outside_rth", "transmit"}
+        order_fields = {"action", "quantity", "order_type", "time_in_force", "limit_price", "account_ref", "client_order_id", "outside_rth", "transmit"}
         if not isinstance(contract, dict) or set(contract) != contract_fields:
             raise RuntimeIpcError("contract payload has unknown or missing fields")
         if not isinstance(order, dict) or set(order) != order_fields:
@@ -101,8 +102,17 @@ def validate_command(command: str, payload: dict[str, Any]) -> None:
             or order["quantity"] <= 0
         ):
             raise RuntimeIpcError("order must have BUY/SELL and positive whole-share quantity")
-        if order["order_type"] != "MKT" or order["time_in_force"] != "DAY":
-            raise RuntimeIpcError("only MKT/DAY orders are accepted")
+        if order["order_type"] not in {"MKT", "LMT"} or order["time_in_force"] != "DAY":
+            raise RuntimeIpcError("only MKT/DAY and LMT/DAY orders are accepted")
+        if order["order_type"] == "LMT":
+            try:
+                limit_price = Decimal(str(order["limit_price"]))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise RuntimeIpcError("LMT orders require a finite positive limit price") from exc
+            if not limit_price.is_finite() or limit_price <= 0:
+                raise RuntimeIpcError("LMT orders require a finite positive limit price")
+        elif order["limit_price"] is not None:
+            raise RuntimeIpcError("MKT orders cannot specify a limit price")
         if not isinstance(order["account_ref"], str) or not order["account_ref"].strip() or len(order["account_ref"]) > 128:
             raise RuntimeIpcError("configured account reference is required")
         if not isinstance(order["client_order_id"], str) or not order["client_order_id"].strip() or len(order["client_order_id"]) > 64:
@@ -355,13 +365,29 @@ class IbkrSubprocessPaperTransport:
             or getattr(intent, "instrument_id", None) != command.instrument
             or getattr(intent, "side", None) != command.side
             or getattr(intent, "integer_qty", None) != command.quantity
-            or getattr(intent, "order_type", None) != "market"
-            or getattr(intent, "time_in_force", None) != "DAY"
+            or getattr(intent, "order_type", None) != command.order_type
+            or getattr(intent, "time_in_force", None) != command.time_in_force
+            or (
+                None if getattr(intent, "limit_price", None) is None
+                else Decimal(str(getattr(intent, "limit_price")))
+            ) != command.limit_price
             or not isinstance(intent_id, str) or not intent_id
             or not isinstance(attempt_id, str) or not attempt_id
             or not isinstance(client_order_id, str) or not client_order_id
         ):
             raise RuntimeIpcError("native order differs from the frozen PAPER intent")
+        limit_price = getattr(intent, "limit_price", None)
+        if getattr(intent, "order_type", None) == "limit":
+            if limit_price is None:
+                raise RuntimeIpcError("limit intent has no limit price")
+            try:
+                limit_price = Decimal(str(limit_price))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise RuntimeIpcError("limit intent has an invalid limit price") from exc
+            if not limit_price.is_finite() or limit_price <= 0:
+                raise RuntimeIpcError("limit intent has an invalid limit price")
+        elif limit_price is not None:
+            raise RuntimeIpcError("market intent cannot specify a limit price")
         verified = self.contract_loader(intent.instrument_id)
         if isinstance(verified, Mapping):
             contract = dict(verified)
@@ -390,8 +416,9 @@ class IbkrSubprocessPaperTransport:
         order = {
             "action": command.side,
             "quantity": command.quantity,
-            "order_type": "MKT",
+            "order_type": "LMT" if limit_price is not None else "MKT",
             "time_in_force": "DAY",
+            "limit_price": str(limit_price) if limit_price is not None else None,
             "account_ref": account_ref,
             "client_order_id": client_order_id,
             "outside_rth": False,

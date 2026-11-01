@@ -212,6 +212,7 @@ class PaperOrderDispatchService:
             integer_qty=intent.integer_qty,
             order_type=intent.order_type,
             time_in_force=intent.time_in_force,
+            limit_price=intent.limit_price,
         )
         decision = evaluate_order_risk(grant, candidate, facts)
         if not decision.allowed:

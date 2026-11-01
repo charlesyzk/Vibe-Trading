@@ -12,6 +12,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import backtrader as bt
+
 from src.execution.backtrader_dispatch import OneShotLedgerIntentResolver
 from src.execution.contracts import Bar, Environment
 from src.execution.event_journal import EventNotReady, SQLiteEventJournal
@@ -118,9 +120,9 @@ class PythonPaperEventBridge:
             self._validate_intent(intent, outcome, bar, proposals[0])
             with self.intent_resolver.bind_next(handoff_result.intent_id):
                 if intent.side == "BUY":
-                    native_order = strategy.buy(data=data, size=intent.integer_qty)
+                    native_order = self._submit_native(strategy, data, intent)
                 elif intent.side == "SELL":
-                    native_order = strategy.sell(data=data, size=intent.integer_qty)
+                    native_order = self._submit_native(strategy, data, intent)
                 else:  # The durable intent model currently permits BUY/SELL only.
                     raise PaperEventBridgeError("durable intent has an unsupported order side")
             return PaperEventBridgeResult(outcome, handoff_result.intent_id, native_order)
@@ -173,11 +175,28 @@ class PythonPaperEventBridge:
             "integer_qty": proposal.integer_qty,
             "order_type": proposal.order_type,
             "time_in_force": proposal.time_in_force,
+            "limit_price": proposal.limit_price,
             "decision_id": f"{outcome.event.run_id}:{outcome.event.event_id}:0",
         }
         mismatches = [key for key, value in expected.items() if getattr(intent, key) != value]
         if mismatches:
             raise PaperEventBridgeError("durable intent differs from current event: " + ",".join(mismatches))
+
+    @staticmethod
+    def _submit_native(strategy: Any, data: Any, intent: OrderIntentInput):
+        if intent.order_type == "market":
+            submit = strategy.buy if intent.side == "BUY" else strategy.sell
+            return submit(data=data, size=intent.integer_qty)
+        if intent.order_type == "limit" and intent.limit_price is not None:
+            submit = strategy.buy if intent.side == "BUY" else strategy.sell
+            return submit(
+                data=data,
+                size=intent.integer_qty,
+                exectype=bt.Order.Limit,
+                price=float(intent.limit_price),
+                valid=bt.Order.DAY,
+            )
+        raise PaperEventBridgeError("paper event bridge received an unsupported order policy")
 
     def _pause_fail_closed(self) -> None:
         try:

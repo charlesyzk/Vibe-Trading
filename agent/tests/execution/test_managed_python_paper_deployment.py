@@ -11,6 +11,7 @@ from src.execution.contracts import Environment
 from src.execution.dispatch_service import PaperOrderDispatchService
 from src.execution.event_journal import SQLiteEventJournal
 from src.execution.event_worker import PythonEventCoordinator
+from src.execution.ibkr_order_ids import IbkrOrderIdAllocator
 from src.execution.managed_python_paper_deployment import (
     ManagedPythonPaperDeploymentError,
     ManagedPythonPaperDeploymentFactory,
@@ -234,6 +235,8 @@ def test_session_builder_failure_does_not_start_or_lease_runtime(tmp_path):
     assert runtime.process.pid is None
     assert runtime._started is False
     assert service.lease_held is False
+    retry_allocator = IbkrOrderIdAllocator(runtime.allocator.path)
+    retry_allocator.close()
     allocator.close()
 
 

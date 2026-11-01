@@ -92,11 +92,15 @@ def build_frozen_python_upload_paper_composition(
     dispatch_risk_facts: DispatchRiskFactsProvider,
     feeds: Mapping[str, PaperCompletedBarFeed],
     data_by_con_id: Mapping[int, Any],
+    feed_factory: Callable[
+        [], tuple[Mapping[str, PaperCompletedBarFeed], Mapping[int, Any]]
+    ] | None = None,
     resolve_contract_identity: ContractIdentityResolver,
     control_authorizer: ControlAuthorizer,
     now: Callable[[], datetime],
     queue_size: int = 256,
     idle_poll_seconds: float = 0.05,
+    allow_unreported_usd_cash: bool = False,
 ) -> PaperExecutionComposition:
     """Build one offline, exact-version Python-upload PAPER composition.
 
@@ -127,10 +131,12 @@ def build_frozen_python_upload_paper_composition(
         sandbox=sandbox,
         feeds=feeds,
         data_by_con_id=data_by_con_id,
+        feed_factory=feed_factory,
         resolve_contract_identity=resolve_contract_identity,
         now=now,
         queue_size=queue_size,
         idle_poll_seconds=idle_poll_seconds,
+        allow_unreported_usd_cash=allow_unreported_usd_cash,
     )
     # Refuse incompatible frozen policies and contract/feed maps before the
     # composition can report readiness. These checks are local and side-effect

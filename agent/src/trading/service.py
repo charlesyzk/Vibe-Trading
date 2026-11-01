@@ -1451,6 +1451,7 @@ def _ibkr_config(profile: TradingProfile, overrides: dict[str, Any]):
         port=_int_or_none(overrides.get("port")),
         client_id=_int_or_none(overrides.get("client_id")),
         account=_clean(overrides.get("account")),
+        market_data_type=_int_or_none(overrides.get("market_data_type")),
     ), readonly=profile.readonly)
 
 

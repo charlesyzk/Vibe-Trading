@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, BinaryIO
 
 PROTOCOL_VERSION = 1
@@ -96,7 +97,7 @@ def validate_request(value: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     if command == "place_order":
         contract, order = payload["contract"], payload["order"]
         contract_fields = {"con_id", "symbol", "security_type", "exchange", "primary_exchange", "currency"}
-        order_fields = {"action", "quantity", "order_type", "time_in_force", "account_ref", "client_order_id", "outside_rth", "transmit"}
+        order_fields = {"action", "quantity", "order_type", "time_in_force", "limit_price", "account_ref", "client_order_id", "outside_rth", "transmit"}
         if not isinstance(contract, dict) or set(contract) != contract_fields:
             raise IpcProtocolError("contract payload has unknown or missing fields")
         if not isinstance(order, dict) or set(order) != order_fields:
@@ -119,8 +120,17 @@ def validate_request(value: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
             or order["quantity"] <= 0
         ):
             raise IpcProtocolError("order must have BUY/SELL and positive whole-share quantity")
-        if order["order_type"] != "MKT" or order["time_in_force"] != "DAY":
-            raise IpcProtocolError("only MKT/DAY orders are accepted")
+        if order["order_type"] not in {"MKT", "LMT"} or order["time_in_force"] != "DAY":
+            raise IpcProtocolError("only MKT/DAY and LMT/DAY orders are accepted")
+        if order["order_type"] == "LMT":
+            try:
+                limit_price = Decimal(str(order["limit_price"]))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise IpcProtocolError("LMT orders require a finite positive limit price") from exc
+            if not limit_price.is_finite() or limit_price <= 0:
+                raise IpcProtocolError("LMT orders require a finite positive limit price")
+        elif order["limit_price"] is not None:
+            raise IpcProtocolError("MKT orders cannot specify a limit price")
         if not isinstance(order["account_ref"], str) or not order["account_ref"].strip() or len(order["account_ref"]) > 128:
             raise IpcProtocolError("configured account reference is required")
         if not isinstance(order["client_order_id"], str) or not order["client_order_id"].strip() or len(order["client_order_id"]) > 64:

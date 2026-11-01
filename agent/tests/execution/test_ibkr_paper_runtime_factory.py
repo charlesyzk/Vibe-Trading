@@ -98,11 +98,16 @@ def test_config_requires_matching_explicit_tws_paper_profile(tmp_path):
     assert config.gateway_port == 7497
 
 
-@pytest.mark.parametrize("account", ["U123456", "paper-fixture", "DUABC", "DU123456,DU654321"])
+@pytest.mark.parametrize("account", ["U123456", "paper-fixture", "DUABC-", "DU123456,DU654321"])
 def test_config_rejects_non_single_ibkr_paper_account_identity(tmp_path, account):
-    with pytest.raises(IbkrPaperRuntimeConfigurationError, match="DU numeric account form"):
+    with pytest.raises(IbkrPaperRuntimeConfigurationError, match="start with DU"):
         _config(tmp_path, account=account)
     assert not (tmp_path / "paper.sqlite").exists()
+
+
+def test_config_accepts_alphanumeric_paper_account_reference(tmp_path):
+    config = _config(tmp_path, account="DUR123456")
+    assert config.account_ref == "DUR123456"
 
 
 def test_config_rejects_non_loopback_gateway_host(tmp_path):

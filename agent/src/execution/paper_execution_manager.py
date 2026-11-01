@@ -138,11 +138,22 @@ class PaperExecutionManager:
             raise TypeError("startup_readiness must be a PaperExecutionReadiness or None")
         self.runtime_factory = runtime_factory
         self.control_authorizer = control_authorizer or (lambda *_: False)
+        self._last_start_error_code: str | None = None
         # Missing readiness is intentionally incomplete. A bare registered
         # runtime factory cannot establish account/session/provider wiring.
         self.startup_readiness = startup_readiness or PaperExecutionReadiness()
         self._entry: _ManagedEntry | None = None
         self._lock = RLock()
+        self._stopped_activity: tuple[PaperRuntimeScope, object] | None = None
+
+    def bind_stopped_activity(self, scope: PaperRuntimeScope, ledger: object) -> None:
+        """Bind the trusted local ledger for history reads when no runtime exists."""
+        if not isinstance(scope, PaperRuntimeScope) or not callable(getattr(ledger, "list_activity_for_scope", None)):
+            raise TypeError("a trusted PAPER scope and ledger are required")
+        with self._lock:
+            if self._entry is not None:
+                raise PaperRuntimeConflict("cannot bind activity while a runtime occupies the slot")
+            self._stopped_activity = (scope, ledger)
 
     def bind_startup_readiness(self, readiness: PaperExecutionReadiness) -> None:
         """Bind the app's readiness declaration before any runtime is started."""
@@ -178,6 +189,18 @@ class PaperExecutionManager:
                 last_error_code=entry.last_error_code or session_error_code,
             )
 
+    @property
+    def last_start_error_code(self) -> str | None:
+        """Return a safe exception-class diagnostic for a failed construction.
+
+        Factory failures can happen before a runtime exists, in which case
+        there is no active entry to carry its error code. Retain only exception
+        class names so callers can distinguish failure categories without
+        exposing account, credential, or transport details.
+        """
+        with self._lock:
+            return self._last_start_error_code
+
     def activity_snapshot(self, *, limit: int = 50) -> dict:
         """Read durable PAPER activity through the currently trusted scope.
 
@@ -189,11 +212,17 @@ class PaperExecutionManager:
             raise ValueError("limit must be an integer between 1 and 100")
         with self._lock:
             entry = self._entry
-            if entry is None or entry.runtime is None:
-                raise PaperRuntimeUnavailable("no managed PAPER runtime is active")
-            runtime = entry.runtime
-            scope = entry.scope
-            ledger = getattr(runtime.service, "ledger", None)
+            if entry is None:
+                if self._stopped_activity is None:
+                    raise PaperRuntimeUnavailable("no managed PAPER runtime is active")
+                scope, ledger = self._stopped_activity
+                runtime = None
+            elif entry.runtime is None:
+                raise PaperRuntimeUnavailable("managed PAPER runtime is unavailable")
+            else:
+                runtime = entry.runtime
+                scope = entry.scope
+                ledger = getattr(runtime.service, "ledger", None)
             if ledger is None or not callable(getattr(ledger, "list_activity_for_scope", None)):
                 raise PaperRuntimeNotReady("managed PAPER runtime has no durable activity reader")
 
@@ -230,7 +259,13 @@ class PaperExecutionManager:
                 for record in records_by_id.values()
                 if ledger.get_intent(record.intent_id).side == "SELL"
             )
-            control_state, control_reason = runtime.service.state()
+            if runtime is None:
+                control_state, _ = ledger.get_execution_control(
+                    broker=scope.broker, account_ref=scope.account_ref, environment=scope.environment,
+                )
+                control_reason = "runtime_stopped_broker_snapshot_unavailable"
+            else:
+                control_state, control_reason = runtime.service.state()
 
             position_state = {
                 "source": "unknown",
@@ -238,7 +273,9 @@ class PaperExecutionManager:
                 "positions": [],
                 "reason": "no fresh authoritative broker snapshot is available",
             }
-            snapshot_reader = getattr(runtime, "latest_reconciled_snapshot", None)
+            snapshot_reader = getattr(runtime, "latest_reconciled_activity_snapshot", None)
+            if not callable(snapshot_reader):
+                snapshot_reader = getattr(runtime, "latest_reconciled_snapshot", None)
             if callable(snapshot_reader):
                 try:
                     snapshot = snapshot_reader()
@@ -355,10 +392,27 @@ class PaperExecutionManager:
                         "runtime startup must finish recovered, PAUSED, and holding the owner lease"
                     )
                 entry.phase = "READY"
+                self._last_start_error_code = None
                 return self.status()  # type: ignore[return-value]
             except Exception as exc:
                 entry.phase = "START_FAILED"
-                entry.last_error_code = type(exc).__name__
+                stage = getattr(getattr(entry.runtime, "runtime", entry.runtime), "last_start_stage", None)
+                exception_types = [type(exc).__name__]
+                cause = exc.__cause__
+                while cause is not None and len(exception_types) < 3:
+                    exception_types.append(type(cause).__name__)
+                    cause = cause.__cause__
+                safe_code = getattr(exc, "safe_error_code", None)
+                if (
+                    isinstance(safe_code, str)
+                    and safe_code.isascii()
+                    and safe_code.replace("_", "").isalnum()
+                ):
+                    exception_types.append(safe_code)
+                entry.last_error_code = ":".join(exception_types)
+                if isinstance(stage, str):
+                    entry.last_error_code = f"{entry.last_error_code}:{stage}"
+                self._last_start_error_code = entry.last_error_code
                 if entry.runtime is None or not started:
                     # Factory construction failed before any runtime was
                     # returned, so no owned process or lease can be released.
@@ -391,6 +445,46 @@ class PaperExecutionManager:
                 entry.phase = "ERROR"
                 raise ExecutionServiceNotReady("runtime activation did not open the durable RUNNING gate")
             return self.status()  # type: ignore[return-value]
+
+    def start_activate_and_push_completed_bar(
+        self,
+        scope: PaperRuntimeScope,
+        principal: Principal,
+        *,
+        expected_strategy_version_id: str,
+        bar: Any,
+    ) -> PaperRuntimeStatus:
+        """Run the manager-owned, authorized start/activate/feed transition atomically."""
+        with self._lock:
+            self._authorize(principal, scope, "start")
+            status = self.start(scope)
+            entry = self._require_entry(scope, phase="READY")
+            runtime = entry.runtime
+            assert runtime is not None
+            if getattr(runtime, "version_id", None) != expected_strategy_version_id:
+                raise PaperRuntimeNotReady("active session differs from the pinned one-shot strategy version")
+            self._authorize(principal, scope, "activate")
+            state, _reason = runtime.service.state()
+            if state is not ExecutionControlState.PAUSED:
+                raise PaperRuntimeConflict("one-shot integration action requires a paused session")
+            runtime.activate()
+            state, _reason = runtime.service.state()
+            if state is not ExecutionControlState.RUNNING:
+                entry.phase = "ERROR"
+                raise ExecutionServiceNotReady("runtime activation did not open the durable RUNNING gate")
+            push = getattr(runtime, "push_completed_bar", None)
+            if not callable(push):
+                runtime.pause(reason="integration_test_feed_unavailable")
+                raise PaperRuntimeNotReady("managed strategy session cannot accept completed bars")
+            try:
+                push(bar)
+            except Exception:
+                try:
+                    runtime.pause(reason="integration_test_bar_rejected")
+                except Exception:
+                    entry.phase = "ERROR"
+                raise
+            return self.status() or status
 
     def recover_failed_session(
         self, scope: PaperRuntimeScope, principal: Principal,
@@ -464,6 +558,27 @@ class PaperExecutionManager:
                 raise ExecutionServiceNotReady("runtime failed to persist PAUSED state")
             entry.phase = "READY"
             return self.status()  # type: ignore[return-value]
+
+    def pause_and_refresh_account_snapshot(self, scope: PaperRuntimeScope) -> dict:
+        """Close the send gate, then reconcile broker orders and positions."""
+        with self._lock:
+            entry = self._require_entry(scope, phase="READY")
+            runtime = entry.runtime
+            assert runtime is not None
+            runtime.pause(reason="one_shot_paper_integration_complete")
+            state, _reason = runtime.service.state()
+            if state is not ExecutionControlState.PAUSED:
+                entry.phase = "ERROR"
+                raise ExecutionServiceNotReady("PAPER runtime did not confirm a durable pause")
+            broker_runtime = getattr(runtime, "runtime", runtime)
+            refresh = getattr(broker_runtime, "refresh_risk_snapshot", None)
+            if not callable(refresh):
+                raise PaperRuntimeNotReady("managed PAPER runtime cannot refresh account reconciliation")
+            try:
+                refresh()
+            except Exception as exc:
+                raise PaperExecutionManagerError("post-order PAPER account reconciliation failed") from exc
+            return self.activity_snapshot(limit=10)
 
     def cancel_owned_order(self, scope: PaperRuntimeScope, intent_id: str, principal: Principal):
         """Issue one independently authorized cancel request for an owned order.

@@ -118,6 +118,9 @@ class TrustedTemplatePaperSessionBuilder:
 
     def __call__(self, runtime, scope: PaperRuntimeScope) -> ManagedPythonPaperSession:
         self._validate_runtime(runtime, scope)
+        bind_runtime = getattr(self.dispatch_risk_facts, "bind_runtime", None)
+        if callable(bind_runtime):
+            bind_runtime(runtime)
         record = self._load_frozen_template()
         self._validate_feed_contracts(record)
 

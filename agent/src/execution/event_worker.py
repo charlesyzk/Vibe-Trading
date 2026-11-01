@@ -126,6 +126,7 @@ class PythonEventCoordinator:
             bar=bar,
             state=self.journal.get_checkpoint(run_id),
         )
+        _validate_frozen_order_policy(result, record.spec)
         committed = self.journal.commit_result(run_id, result)
         return EventWorkerOutcome(event=released, committed=committed, result=result)
 
@@ -168,6 +169,7 @@ class PythonEventCoordinator:
                     bar=bar,
                     state=state,
                 )
+                _validate_frozen_order_policy(recomputed, record.spec)
                 if canonical_json(recomputed) != canonical_json(event.result):
                     raise EventWorkerError(f"committed event {event.seq} shadow replay differs")
                 state = recomputed.state
@@ -326,6 +328,15 @@ def invoke_strategy_worker(
         raise
     except Exception as exc:
         raise EventWorkerError(f"strategy worker result was rejected: {exc}") from exc
+
+
+def _validate_frozen_order_policy(result: WorkerEventResult, spec: Any) -> None:
+    if any(
+        proposal.order_type != spec.execution_policy.order_type
+        or proposal.time_in_force != spec.execution_policy.time_in_force
+        for proposal in result.order_proposals
+    ):
+        raise EventWorkerError("worker proposal order policy differs from the frozen strategy version")
 
 
 def _completed_bar_payload(value: Bar | dict[str, Any], spec: Any, *, now: datetime) -> Bar:

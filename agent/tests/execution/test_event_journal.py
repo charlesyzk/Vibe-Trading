@@ -137,6 +137,7 @@ def test_result_checkpoint_and_outbox_commit_together_and_replay_idempotently(jo
             "proposal_index": 0,
             "proposal": {
                 "integer_qty": 3,
+                "limit_price": None,
                 "order_type": "market",
                 "reason": "cross_up",
                 "side": "BUY",

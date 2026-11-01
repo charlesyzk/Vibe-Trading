@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from typing import Any, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status as http_status
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.api.security import require_auth, require_event_stream_auth
 from src.api.state import _get_paper_execution_manager, _get_paper_execution_readiness
+from src.api.state import _set_paper_execution_composition
 from src.execution.order_ledger import ExecutionControlState, InvalidActivityCursor
 from src.execution.contracts import is_sha256
 from src.execution.paper_execution_manager import (
@@ -21,6 +23,15 @@ from src.execution.paper_execution_manager import (
     PaperRuntimeStatus,
 )
 from src.execution.paper_execution_readiness import PaperExecutionReadiness
+from src.execution.paper_integration_test_composition import PaperSignalSessionMismatch
+from src.execution.paper_strategy_candidates import list_paper_strategy_candidates
+from src.execution.paper_strategy_deployment import (
+    PaperStrategyDeploymentError,
+    commit_paper_strategy_selection,
+    paper_execution_ledger_is_empty,
+    prepare_paper_strategy_selection,
+    rollback_paper_strategy_selection,
+)
 from src.session.models import Principal
 
 
@@ -72,6 +83,12 @@ class PaperCancelOrderRequest(BaseModel):
         if not value.strip():
             raise ValueError("intent_id must not be blank")
         return value
+
+
+class PaperStrategySelectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_version_id: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class PaperCancelOrderResponse(BaseModel):
@@ -144,6 +161,7 @@ def _status_response(manager, readiness) -> PaperExecutionStatusResponse:
             missing_requirements=missing_requirements,
             phase="STOPPED" if configured else "NOT_CONFIGURED",
             reason="runtime_not_started" if configured else "runtime_composition_not_configured",
+            last_error_code=getattr(manager, "last_start_error_code", None),
             strategy_version_id=pinned_version_id,
         )
     state = managed_status.control_state
@@ -191,6 +209,125 @@ def register_paper_execution_routes(app: FastAPI) -> None:
             )
         except Exception as exc:
             raise _management_error(exc) from exc
+
+    @app.get(
+        "/api/execution/paper/strategy-candidates",
+        dependencies=[Depends(require_auth)],
+    )
+    async def get_paper_strategy_candidates() -> dict[str, Any]:
+        """List frozen versions with verified reports and exact PAPER eligibility."""
+        try:
+            return list_paper_strategy_candidates()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PAPER strategy candidate catalog is unavailable",
+            ) from exc
+
+    @app.post("/api/execution/paper/strategy-candidates/select")
+    async def select_paper_strategy_candidate(
+        request: Request,
+        body: PaperStrategySelectRequest,
+        principal: Principal = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Select a verified candidate without connecting to IBKR or placing an order."""
+        if not isinstance(principal, Principal) or not principal.attributable:
+            raise HTTPException(
+                status_code=http_status.HTTP_403_FORBIDDEN,
+                detail="an attributable local operator is required to select a PAPER strategy",
+            )
+        manager = _manager(request.app)
+        composition = getattr(request.app.state, "paper_execution_composition", None)
+        runner = getattr(composition, "integration_test_runner", None)
+        runner_lock = getattr(runner, "_lock", None)
+        manager_lock = getattr(manager, "_lock", None)
+        if not callable(getattr(runner_lock, "acquire", None)) or not callable(
+            getattr(manager_lock, "acquire", None)
+        ):
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="the installed PAPER composition cannot be safely reconfigured",
+            )
+        if not runner_lock.acquire(blocking=False):
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="a PAPER integration action is in progress",
+            )
+        receipt = None
+        old_composition = composition
+        try:
+            with manager_lock:
+                if manager is not _manager(request.app):
+                    raise HTTPException(
+                        status_code=http_status.HTTP_409_CONFLICT,
+                        detail="PAPER composition changed; refresh the candidate list",
+                    )
+                if manager.status() is not None:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_409_CONFLICT,
+                        detail="stop the PAPER runtime before changing the selected strategy",
+                    )
+                if not paper_execution_ledger_is_empty():
+                    raise HTTPException(
+                        status_code=http_status.HTTP_409_CONFLICT,
+                        detail="the one-shot PAPER ledger is not empty; strategy replacement is disabled",
+                    )
+                try:
+                    receipt = prepare_paper_strategy_selection(
+                        body.strategy_version_id,
+                        operator_subject=principal.subject,
+                    )
+                    from src.execution.paper_integration_test_composition import (
+                        build_paper_integration_test_composition,
+                    )
+
+                    replacement = build_paper_integration_test_composition()
+                    if getattr(replacement.manager.runtime_factory, "strategy_version_id", None) != body.strategy_version_id:
+                        raise RuntimeError("replacement composition did not pin the requested version")
+                    _set_paper_execution_composition(
+                        replacement.manager,
+                        replacement.readiness,
+                        app=request.app,
+                        scope=replacement.scope,
+                    )
+                    request.app.state.paper_execution_composition = replacement
+                    commit_paper_strategy_selection(receipt)
+                except Exception as exc:
+                    if receipt is not None:
+                        try:
+                            rollback_paper_strategy_selection(receipt)
+                        except Exception:
+                            pass
+                    if request.app.state.paper_execution_manager is not getattr(old_composition, "manager", None):
+                        try:
+                            _set_paper_execution_composition(
+                                old_composition.manager,
+                                old_composition.readiness,
+                                app=request.app,
+                                scope=old_composition.scope,
+                            )
+                            request.app.state.paper_execution_composition = old_composition
+                        except Exception:
+                            pass
+                    raise HTTPException(
+                        status_code=http_status.HTTP_409_CONFLICT,
+                        detail="PAPER strategy selection failed closed; current deployment was preserved",
+                    ) from exc
+            readiness = _readiness(request.app)
+            return {
+                "strategy_version_id": body.strategy_version_id,
+                "backtest_report_sha256": receipt["report_sha256"],
+                "composition_ready": readiness.composition_ready,
+                "deployment_mode": "fixed_one_shot_paper_integration",
+                "order_submission_performed": False,
+            }
+        except PaperStrategyDeploymentError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        finally:
+            runner_lock.release()
 
     @app.get(
         "/api/execution/paper/activity/events",
@@ -305,10 +442,69 @@ def register_paper_execution_routes(app: FastAPI) -> None:
                 detail="requested strategy version does not match the trusted PAPER composition",
             )
         try:
-            manager.start_for_principal(scope, principal)
+            # Coordinate with the strategy selection route so a request that
+            # captured the previous manager cannot start it after a rebind.
+            with getattr(manager, "_lock", nullcontext()):
+                if manager is not _manager(request.app):
+                    raise PaperExecutionManagerError("PAPER composition changed before startup")
+                manager.start_for_principal(scope, principal)
         except Exception as exc:
             raise _management_error(exc) from exc
         return _status_response(manager, readiness)
+
+    @app.post("/api/execution/paper/integration-test/run")
+    async def run_paper_integration_test(
+        request: Request,
+        principal: Principal = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Fetch and feed the pinned completed bar through one authorized PAPER action."""
+        composition = getattr(request.app.state, "paper_execution_composition", None)
+        runner = getattr(composition, "integration_test_runner", None)
+        if not callable(runner):
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="one-shot PAPER integration runner is not configured",
+            )
+        try:
+            return await asyncio.to_thread(runner, principal)
+        except PaperSignalSessionMismatch as exc:
+            raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail={
+                "code": "paper_signal_session_mismatch",
+                "message": "The backtest evaluation date is not the latest completed IBKR session.",
+            }) from exc
+        except PaperRuntimeAuthorizationError as exc:
+            raise _management_error(exc) from exc
+        except PaperExecutionManagerError as exc:
+            raise _management_error(exc) from exc
+        except Exception as exc:
+            # Provider, Gateway and bar-data details are kept out of the HTTP
+            # response; diagnostics remain in the local app/runtime logs.
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="one-shot PAPER integration action failed closed",
+            ) from exc
+
+    @app.get("/api/execution/paper/integration-test/status")
+    async def get_paper_integration_test_status(
+        request: Request,
+        _principal: Principal = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Read the fixed one-shot PAPER order and its configured UTC window."""
+        composition = getattr(request.app.state, "paper_execution_composition", None)
+        runner = getattr(composition, "integration_test_runner", None)
+        status_reader = getattr(runner, "status_snapshot", None)
+        if not callable(status_reader):
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="one-shot PAPER integration runner is not configured",
+            )
+        try:
+            return status_reader()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="one-shot PAPER integration configuration is unavailable",
+            ) from exc
 
     @app.post(
         "/api/execution/paper/recover",

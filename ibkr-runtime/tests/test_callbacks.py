@@ -59,6 +59,10 @@ class IbapiCallbackAdapterTests(unittest.TestCase):
         ])
         for event in batch:
             self.assertEqual(dict(event.payload)["snapshot_id"], 1900000001)
+        prior_size = events.qsize()
+        adapter.accountSummaryEnd(1900000001)
+        self.assertEqual(events.qsize(), prior_size)
+        self.assertFalse(adapter.overflowed.is_set())
         # All three markers release the in-flight slot for the next request.
         adapter.begin_reconciliation_snapshot(1900000002)
 
@@ -87,6 +91,21 @@ class IbapiCallbackAdapterTests(unittest.TestCase):
                     "SELECT kind,payload_json,processed FROM ibkr_callback_spool"
                 ).fetchall()
             self.assertEqual(rows, [("next_valid_id", json.dumps({"order_id": 7}, separators=(",", ":")), 0)])
+
+    def test_spool_replays_same_handshake_callback_in_a_new_runtime_epoch(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "callbacks.sqlite"
+            first = SQLiteCallbackSpool(path, epoch_id="runtime-one")
+            event = CallbackEvent.create("next_valid_id", order_id=7)
+            first.append(event)
+            first.mark_processed(first.pending()[0][0])
+
+            second = SQLiteCallbackSpool(path, epoch_id="runtime-two")
+            second.append(event)
+
+            pending = second.pending()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0][1], event)
 
     def test_spool_returns_ordered_pending_events_and_acknowledges_after_consumer_commit(self) -> None:
         with TemporaryDirectory() as directory:

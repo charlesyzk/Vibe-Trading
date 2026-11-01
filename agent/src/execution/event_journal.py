@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import Field, JsonValue, field_validator, model_validator
+from decimal import Decimal
 
 from src.execution.contracts import Environment, canonical_json, is_sha256
 from src.execution.contracts.models import StrictModel
@@ -38,14 +39,20 @@ class WorkerOrderProposal(StrictModel):
     integer_qty: Annotated[int, Field(strict=True, gt=0)]
     order_type: str = "market"
     time_in_force: str = "DAY"
+    limit_price: Decimal | None = None
     reason: Annotated[str, Field(max_length=1_024)] | None = None
 
     @model_validator(mode="after")
     def validate_proposal(self) -> "WorkerOrderProposal":
         if self.side not in {"BUY", "SELL"}:
             raise ValueError("proposal side must be BUY or SELL")
-        if self.order_type != "market" or self.time_in_force != "DAY":
-            raise ValueError("only Market/DAY proposals are supported")
+        if self.order_type not in {"market", "limit"} or self.time_in_force != "DAY":
+            raise ValueError("only Market/DAY and Limit/DAY proposals are supported")
+        if self.order_type == "limit":
+            if self.limit_price is None or not self.limit_price.is_finite() or self.limit_price <= 0:
+                raise ValueError("limit proposals require a finite positive limit price")
+        elif self.limit_price is not None:
+            raise ValueError("market proposals cannot include a limit price")
         return self
 
 

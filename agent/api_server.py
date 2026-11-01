@@ -9,7 +9,10 @@ infrastructure lives in ``src.api.{security,models,helpers,state}``.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
+import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -168,6 +171,55 @@ def configure_paper_execution_app(
 def _install_paper_execution_app_composition(target_app: FastAPI) -> None:
     """Install typed app-root composition, or establish the inert default."""
     composition = getattr(target_app.state, "paper_execution_composition", None)
+    if composition is None:
+        factory_spec = os.environ.get("VIBE_PAPER_COMPOSITION_FACTORY", "").strip()
+        if factory_spec:
+            module_name, separator, attribute_name = factory_spec.partition(":")
+            identifier = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
+            if (
+                not separator
+                or not identifier.fullmatch(module_name)
+                or not re.fullmatch(r"[A-Za-z_]\w*", attribute_name)
+            ):
+                raise RuntimeError(
+                    "VIBE_PAPER_COMPOSITION_FACTORY must be a trusted module:function reference"
+                )
+            try:
+                factory = getattr(importlib.import_module(module_name), attribute_name)
+                if not callable(factory):
+                    raise TypeError("configured factory is not callable")
+                composition = factory()
+            except Exception as exc:
+                # Keep exception text out of startup logs: an operator factory
+                # may include endpoint/account configuration in its message.
+                raise RuntimeError(
+                    "configured PAPER composition factory could not be loaded"
+                ) from None
+            if not isinstance(composition, PaperExecutionComposition):
+                raise RuntimeError(
+                    "configured PAPER composition factory returned an invalid composition"
+                )
+            target_app.state.paper_execution_composition = composition
+        else:
+            # An operator-created exact-scope integration-test file is an
+            # explicit opt-in for the single fixed AAPL PAPER composition.
+            # Its factory only constructs local collaborators; Gateway startup
+            # still requires the attributable start action below.
+            from src.config.paths import get_runtime_root
+            from src.execution.paper_integration_test_config import CONFIG_FILENAME
+
+            if (get_runtime_root() / CONFIG_FILENAME).is_file():
+                from src.execution.paper_integration_test_composition import (
+                    build_paper_integration_test_composition,
+                )
+
+                try:
+                    composition = build_paper_integration_test_composition()
+                except Exception:
+                    raise RuntimeError(
+                        "local one-shot PAPER integration composition could not be loaded"
+                    ) from None
+                target_app.state.paper_execution_composition = composition
     if composition is None:
         # Materialize app-local defaults at startup so status and shutdown
         # observe the same manager even when no production composition exists.

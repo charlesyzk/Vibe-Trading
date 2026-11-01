@@ -121,18 +121,36 @@ def test_snapshot_store_migrates_legacy_run_table_without_dynamic_default(tmp_pa
     store.begin(2, account_ref="paper-fixture")
 
 
-def test_snapshot_fails_closed_on_wrong_request_id_currency_or_fractional_position(tmp_path):
+def test_snapshot_fails_closed_on_wrong_request_id_invalid_currency_or_fractional_position(tmp_path):
     store = SQLiteIbkrSnapshotStore(tmp_path / "runtime.sqlite")
     store.begin(SNAPSHOT, account_ref="paper-fixture")
     with pytest.raises(ReconciliationSnapshotError, match="request id"):
         store.record("account_summary", {**_account("NetLiquidation", "1"), "request_id": 99})
     with pytest.raises(ReconciliationSnapshotError, match="currency"):
-        store.record("account_summary", {**_account("NetLiquidation", "1"), "currency": "CAD"})
+        store.record("account_summary", {**_account("NetLiquidation", "1"), "currency": "USDX"})
     with pytest.raises(ReconciliationSnapshotError, match="whole share"):
         store.record("position", {
             "snapshot_id": SNAPSHOT, "account": "paper-fixture", "contract_id": 1,
             "symbol": "AAPL", "currency": "USD", "quantity": "0.5", "average_cost": "1",
         })
+
+
+def test_snapshot_accepts_consistent_non_usd_account_summary_currency(tmp_path):
+    store = SQLiteIbkrSnapshotStore(tmp_path / "runtime.sqlite")
+    store.begin(SNAPSHOT, account_ref="paper-fixture")
+    for tag, value in (
+        ("NetLiquidation", "7800000"),
+        ("TotalCashValue", "7000000"),
+        ("AvailableFunds", "6500000"),
+    ):
+        store.record("account_summary", {**_account(tag, value), "currency": "HKD"})
+    store.record("account_summary_end", {"snapshot_id": SNAPSHOT, "request_id": SNAPSHOT})
+    store.record("positions_end", {"snapshot_id": SNAPSHOT})
+    store.record("open_orders_end", {"snapshot_id": SNAPSHOT})
+
+    result = store.complete_snapshot(SNAPSHOT)
+    assert result["capture_complete"] is True
+    assert {row["currency"] for row in result["account_summary"]} == {"HKD"}
 
 
 def test_coordinator_persists_snapshot_before_request_and_leaves_it_incomplete_on_ipc_failure(tmp_path):
@@ -329,4 +347,29 @@ def test_recovery_reconciler_binds_confirmation_to_the_candidate_it_checked(tmp_
     assert allocator.allocation_ready is False
     with pytest.raises(OrderIdNotReady):
         allocator.allocate()
+    allocator.close()
+
+
+def test_risk_snapshot_reconciles_without_changing_ready_order_id_allocator(tmp_path):
+    path = tmp_path / "runtime.sqlite"
+    ledger = SQLiteOrderLedger(path)
+    index = BrokerOrderIndex(path)
+    allocator = IbkrOrderIdAllocator(path)
+    store = SQLiteIbkrSnapshotStore(path)
+    snapshot_id = SNAPSHOT + 1
+    store.begin(snapshot_id, account_ref="paper-fixture")
+    _empty_account_snapshot(store, snapshot_id)
+    allocator.observe_next_valid_id(42)
+    allocator.confirm_reconciled(expected_order_id=42)
+    reconciler = IbkrRecoveryReconciler(
+        store=store, ledger=ledger, order_index=index, allocator=allocator,
+        account_ref="paper-fixture",
+    )
+
+    result = reconciler.reconcile_risk_snapshot(snapshot_id)
+
+    assert result["reconciled"] is True
+    assert result["reconciliation_result"]["purpose"] == "risk_refresh"
+    assert result["reconciliation_result"]["checks"] == ["scope", "open_orders", "positions"]
+    assert allocator.allocation_ready is True
     allocator.close()

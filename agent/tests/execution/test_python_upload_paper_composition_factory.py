@@ -86,7 +86,9 @@ def _make_upload_store(tmp_path: Path, *, spec: StrategySpec | None = None):
     return store, record
 
 
-def _composition(tmp_path: Path, store: StrategyVersionStore, record, *, version_id=None):
+def _composition(
+    tmp_path: Path, store: StrategyVersionStore, record, *, version_id=None, feed_factory=None,
+):
     feed = PaperCompletedBarFeed(instrument_id="AAPL", timezone="America/New_York", queue_size=4)
     proposal_inputs, dispatch_facts, _calls = _providers(record.version_hash, account_ref=ACCOUNT)
     sandbox = PythonSandbox("sha256:" + "a" * 64)
@@ -103,6 +105,7 @@ def _composition(tmp_path: Path, store: StrategyVersionStore, record, *, version
         dispatch_risk_facts=dispatch_facts,
         feeds={"AAPL": feed},
         data_by_con_id={123: feed},
+        feed_factory=feed_factory,
         resolve_contract_identity=lambda symbol: ContractIdentity(123, symbol, "STK", "USD"),
         control_authorizer=lambda _principal, _scope, _action: False,
         now=lambda: NOW,
@@ -135,6 +138,36 @@ def test_upload_factory_builds_exact_frozen_offline_session_without_start_or_lea
         assert runtime.callback_pump.callback_sink is session.callback_router
     finally:
         runtime.allocator.close()
+
+
+def test_upload_session_builder_uses_fresh_completed_bar_feed_per_deployment(tmp_path: Path):
+    store, record = _make_upload_store(tmp_path)
+    created_feeds = []
+
+    def make_feeds():
+        feed = PaperCompletedBarFeed(instrument_id="AAPL", timezone="America/New_York", queue_size=4)
+        created_feeds.append(feed)
+        return {"AAPL": feed}, {123: feed}
+
+    composition = _composition(tmp_path, store, record, feed_factory=make_feeds)
+    deployment_factory = composition.manager.runtime_factory
+    first = deployment_factory(composition.scope)
+    first_feed = first.feeds["AAPL"]
+    first_feed.stop_feed()
+    first.runtime.allocator.close()
+
+    second = deployment_factory(composition.scope)
+    second_feed = second.feeds["AAPL"]
+    try:
+        assert len(created_feeds) == 2
+        assert first_feed is not second_feed
+        assert first_feed._closed is True
+        assert second_feed._closed is False
+        assert second_feed is created_feeds[-1]
+        assert second.runtime.process.pid is None
+        assert second.runtime.service.lease_held is False
+    finally:
+        second.runtime.allocator.close()
 
 
 def test_upload_factory_rejects_nl2_and_unknown_or_mismatched_versions(tmp_path: Path):

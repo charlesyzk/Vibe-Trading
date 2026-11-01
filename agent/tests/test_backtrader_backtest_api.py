@@ -324,8 +324,13 @@ def test_ibkr_history_can_prepare_python_upload_csv_and_pinned_schedule(tmp_path
             frame=frame,
             provenance={
                 "requested_provider": "ibkr", "profile_id": profile_id,
-                "environment": "live", "retrieved_at": "2025-01-09T12:00:00Z",
-                "qualified_contract": {"symbol": "AAPL", "con_id": 265598},
+                "actual_loader_identity": "ibkr-local-tws-api",
+                "environment": "paper" if profile_id == "ibkr-paper-local" else "live",
+                "retrieved_at": "2025-01-09T12:00:00Z",
+                "qualified_contract": {
+                    "symbol": "AAPL", "sec_type": "STK", "currency": "USD",
+                    "con_id": 265598, "exchange": "SMART", "primary_exchange": "NASDAQ",
+                },
             },
         )
 
@@ -359,6 +364,109 @@ def test_ibkr_history_can_prepare_python_upload_csv_and_pinned_schedule(tmp_path
     assert upload_preview.status_code == 200, upload_preview.text
     assert upload_preview.json()["supported"] is True, upload_preview.json()
     assert upload_preview.json()["data_manifest"]["provider"] == "ibkr"
+
+    monkeypatch.setenv("VIBE_PYTHON_WORKER_IMAGE", "sha256:" + "c" * 64)
+    paper_data_response = client.post("/runs/market-data/ibkr/python-upload-preview", json={
+        "symbol": "AAPL", "instrument_id": "AAPL",
+        "profile_id": "ibkr-paper-local", "port": 4002,
+        "warmup_start": "2025-01-02", "warmup_end": "2025-01-03",
+        "evaluation_start": "2025-01-06", "evaluation_end": "2025-01-06",
+    })
+    assert paper_data_response.status_code == 200, paper_data_response.text
+    paper_data = paper_data_response.json()
+    assert paper_data["supported"] is True, paper_data
+    assert paper_data["ibkr_import_token"]
+
+    paper_upload = {
+        "strategy_id": "attested_ibkr_paper_python",
+        "instrument_id": "AAPL",
+        "strategy_source": (Path(__file__).resolve().parents[2] / "frontend/public/templates/paper_aapl_one_shot.py").read_text().replace("2026-10-30", "2025-01-06"),
+        "market_data_csv": paper_data["market_data_csv"],
+        "market_data_metadata": paper_data["market_data_metadata"],
+        "expected_sessions": paper_data["expected_sessions"],
+        "ibkr_import_token": paper_data["ibkr_import_token"],
+        "execution_order_type": "limit", "limit_price_usd": "400.00",
+    }
+    changed_snapshot = {**paper_upload, "market_data_csv": paper_upload["market_data_csv"] + "tampered\n"}
+    rejected_snapshot = client.post("/runs/backtests/python-upload/preview", json=changed_snapshot)
+    assert rejected_snapshot.status_code == 200, rejected_snapshot.text
+    assert rejected_snapshot.json()["supported"] is False
+    assert "does not match" in rejected_snapshot.json()["reason"]
+
+    attested_preview = client.post("/runs/backtests/python-upload/preview", json=paper_upload)
+    assert attested_preview.status_code == 200, attested_preview.text
+    assert attested_preview.json()["supported"] is True, attested_preview.json()
+    assert attested_preview.json()["preview_token"]
+    assert attested_preview.json()["summary"]["ibkr_paper_import_attested"] is True
+    assert attested_preview.json()["data_manifest"]["provider"].startswith("IBKR PAPER Gateway")
+    assert attested_preview.json()["data_manifest"]["download_parameters"][
+        "application_ibkr_paper_import_attestation"
+    ]["environment"] == "paper"
+    replayed_import = client.post("/runs/backtests/python-upload/preview", json=paper_upload)
+    assert replayed_import.json()["supported"] is False
+    assert "proof" in replayed_import.json()["reason"].lower()
+
+    class OneOrderSandbox:
+        def __init__(self, image):
+            self.image = image
+
+        def run_json(self, request):
+            namespace = {}
+            exec(paper_upload["strategy_source"], namespace)
+            result = namespace["on_event"](request["event"], request["state"])
+            return type("Result", (), {"response": {
+                "protocol_version": request["protocol_version"],
+                "request_id": request["request_id"],
+                "event_id": request["event_id"],
+                "state": result["state"],
+                "order_proposals": result["order_proposals"],
+            }})()
+
+    import src.execution.python_sandbox as sandbox_module
+    monkeypatch.setattr(sandbox_module, "PythonSandbox", OneOrderSandbox)
+    import sqlite3
+    preview_token = attested_preview.json()["preview_token"]
+    token_hash = hashlib.sha256(preview_token.encode("ascii")).hexdigest()
+    with sqlite3.connect(tmp_path / "runs" / ".backtest_preview_authorizations.sqlite3") as connection:
+        authorization_row = connection.execute(
+            "SELECT request_hash, consumed_at FROM preview_authorizations WHERE token_hash=?",
+            (token_hash,),
+        ).fetchone()
+    assert authorization_row and authorization_row[1] is None
+    confirm_identity = {
+        "strategy_id": paper_upload["strategy_id"], "instrument_id": "AAPL",
+        "strategy_source": paper_upload["strategy_source"].strip(), "position_quantity": 1,
+        "execution_order_type": "limit", "limit_price_usd": "400.00",
+        "initial_cash": 100000.0, "commission_rate": 0.001, "slippage_fraction": 0.0,
+    }
+    expected_request_hash = hashlib.sha256(json.dumps(
+        confirm_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    assert authorization_row[0] == expected_request_hash, (authorization_row[0], expected_request_hash)
+    create_response = client.post("/runs/backtests/python-upload", json={
+        "strategy_id": paper_upload["strategy_id"],
+        "instrument_id": paper_upload["instrument_id"],
+        "strategy_source": paper_upload["strategy_source"],
+        "position_quantity": 1,
+        "execution_order_type": "limit",
+        "limit_price_usd": "400.00",
+        "preview_token": preview_token,
+    })
+    assert create_response.status_code == 200, create_response.text
+    saved_report = create_response.json()["execution_report"]
+    assert saved_report["data_manifest"]["provider"].startswith("IBKR PAPER Gateway")
+    assert len(saved_report["orders"]) == 1
+    assert saved_report["orders"][0]["side"] == "BUY"
+    assert saved_report["orders"][0]["requested_qty"] == 1
+    assert saved_report["orders"][0]["order_type"] == "limit"
+    assert saved_report["orders"][0]["filled_qty"] == 0
+
+    from src.execution.paper_strategy_candidates import list_paper_strategy_candidates
+    candidate = next(
+        item for item in list_paper_strategy_candidates(runtime_root=tmp_path)["items"]
+        if item["strategy_id"] == paper_upload["strategy_id"]
+    )
+    assert candidate["paper_deployable"] is True, candidate["paper_block_reasons"]
 
 
 def test_report_read_rejects_legacy_report_without_sidecar_silently_claiming_verification(tmp_path: Path, monkeypatch):
@@ -988,6 +1096,29 @@ def test_python_upload_api_uses_separate_route_and_persists_frozen_artifacts(tmp
     assert preview["worker_image"] == "sha256:" + "a" * 64
     assert len(preview["source_sha256"]) == 64
     assert len(preview["market_data_sha256"]) == 64
+    assert preview["strategy_spec"]["parameters"]["quantity"] == 1
+    assert preview["strategy_spec"]["execution_policy"]["order_type"] == "market"
+
+    limit_preview_response = client.post("/runs/backtests/python-upload/preview", json={
+        **payload,
+        "execution_order_type": "limit",
+        "limit_price_usd": "400.00",
+    })
+    assert limit_preview_response.status_code == 200, limit_preview_response.text
+    limit_preview = limit_preview_response.json()
+    assert limit_preview["supported"] is True
+    assert limit_preview["strategy_spec"]["parameters"] == {
+        "quantity": 1,
+        "order_type": "limit",
+        "limit_price_usd": "400.00",
+    }
+    assert limit_preview["strategy_spec"]["execution_policy"]["order_type"] == "limit"
+    invalid_limit_preview = client.post("/runs/backtests/python-upload/preview", json={
+        **payload,
+        "execution_order_type": "limit",
+    })
+    assert invalid_limit_preview.status_code == 422
+    assert "limit_price_usd is required" in invalid_limit_preview.text
     assert _run_directories(tmp_path / "runs") == []
     assert not (tmp_path / "strategy-versions").exists()
 
@@ -1048,6 +1179,15 @@ def test_python_upload_api_uses_separate_route_and_persists_frozen_artifacts(tmp
         "preview_token": preview["preview_token"],
     })
     assert changed_cost_after_review.status_code == 409
+    assert _run_directories(tmp_path / "runs") == []
+
+    changed_execution_after_review = client.post("/runs/backtests/python-upload", json={
+        **payload,
+        "execution_order_type": "limit",
+        "limit_price_usd": "400.00",
+        "preview_token": preview["preview_token"],
+    })
+    assert changed_execution_after_review.status_code == 409
     assert _run_directories(tmp_path / "runs") == []
 
     monkeypatch.setenv("VIBE_PYTHON_WORKER_IMAGE", "sha256:" + "b" * 64)

@@ -6,6 +6,7 @@
     "paperLastErrorCode": "Último código de error del runtime",
     "paperMissingRequirementsTitle": "Qué hace falta para completar la preparación de PAPER",
     "paperRequirement": {
+      "ibkr_runtime_factory": "Un runtime de IBKR PAPER conectado a la cuenta Gateway compartida.",
       "strategy_session_builder": "Un constructor de sesiones que cargue la versión de estrategia aprobada e inmutable.",
       "attributable_control_authorizer": "Una autorización del operador vinculada a un mandato PAPER explícito.",
       "account_reconciliation_facts": "Identidad de la cuenta del bróker, posiciones, órdenes abiertas y pruebas de conciliación.",

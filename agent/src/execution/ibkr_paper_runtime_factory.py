@@ -55,7 +55,11 @@ _PAPER_PROFILE_PORTS = {
     IbkrPaperEndpointProfile.IB_GATEWAY_PAPER: 4002,
     IbkrPaperEndpointProfile.TWS_PAPER: 7497,
 }
-_PAPER_ACCOUNT_RE = re.compile(r"^DU[0-9]+$")
+# IBKR's PAPER account references observed through managedAccounts may include
+# letters as well as digits after the DU prefix. Exact broker-side identity is
+# still enforced during the runtime handshake; this local shape check must not
+# reject an otherwise valid single account reference solely for that reason.
+_PAPER_ACCOUNT_RE = re.compile(r"^DU[A-Z0-9]+$")
 _LOCAL_GATEWAY_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
@@ -109,7 +113,7 @@ class IbkrPaperRuntimeConfig:
         account_ref = self.account_ref.strip().upper()
         if not _PAPER_ACCOUNT_RE.fullmatch(account_ref):
             raise IbkrPaperRuntimeConfigurationError(
-                "single-user PAPER account reference must match the IBKR DU numeric account form"
+                "single-user PAPER account reference must start with DU and contain only ASCII letters or digits"
             )
         python_path = Path(self.python).expanduser()
         cwd_path = Path(self.runtime_cwd).expanduser()

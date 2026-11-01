@@ -169,6 +169,75 @@ export interface PaperExecutionActivity {
   };
 }
 
+export interface PaperIntegrationTestStatus {
+  configured: boolean;
+  enabled: boolean;
+  window_open: boolean;
+  valid_window_utc: { start: string; end: string };
+  symbol: string;
+  side: string;
+  quantity: number;
+  order_type: string;
+  limit_price: string;
+  time_in_force: string;
+  regular_trading_hours_only: boolean;
+  max_notional_usd: string;
+  strategy_version_id: string;
+  backtest_attestation?: {
+    status: "verified" | "blocked";
+    report_sha256?: string;
+    data_manifest_hash?: string;
+    evaluation_start?: string | null;
+    evaluation_end?: string | null;
+    suggested_warmup_date?: string | null;
+  };
+}
+
+export interface PaperIntegrationTestResult {
+  action: string;
+  strategy_version_id: string;
+  bar_session_date: string;
+  bar_source: string;
+  dispatch_gate_open: boolean;
+  phase: string;
+  control_state: string | null;
+  post_order_reconciliation: "verified" | "failed";
+  activity: PaperExecutionActivity | null;
+  order_observed_within_seconds: number | null;
+}
+
+export interface PaperStrategyCandidate {
+  strategy_version_id: string;
+  strategy_id: string;
+  source_kind: string;
+  instrument_ids: string[];
+  execution_order_type: string;
+  execution_time_in_force: string;
+  position_mode: string;
+  run_id: string;
+  backtest_status: "verified";
+  backtest_report_sha256: string;
+  data_manifest_hash: string;
+  evaluation_start: string | null;
+  evaluation_end: string | null;
+  paper_deployable: boolean;
+  currently_deployed: boolean;
+  paper_block_reasons: string[];
+}
+
+export interface PaperStrategyCandidatesResponse {
+  items: PaperStrategyCandidate[];
+  deployment_mode: string;
+  supported_order: {
+    instrument: string;
+    side: string;
+    quantity: number;
+    order_type: string;
+    limit_price: string;
+    time_in_force: string;
+  };
+}
+
 export interface PortfolioConnectorCompatibility {
   level: "native" | "contract_tested" | "experimental";
   contract_version: number;
@@ -481,6 +550,27 @@ export const api = {
   getPortfolio: () => request<{ status: string; snapshot: PortfolioSnapshot | null }>("/api/portfolio"),
   getPaperExecutionStatus: () => request<PaperExecutionStatus>("/api/execution/paper/status"),
   getPaperExecutionActivity: () => request<PaperExecutionActivity>("/api/execution/paper/activity?limit=50"),
+  cancelPaperExecutionOrder: (intentId: string) => request<{ intent_id: string; state: string }>("/api/execution/paper/cancel-owned-order", {
+    method: "POST", body: JSON.stringify({ intent_id: intentId }),
+  }),
+  getPaperIntegrationTestStatus: () => request<PaperIntegrationTestStatus>("/api/execution/paper/integration-test/status"),
+  getPaperStrategyCandidates: () => request<PaperStrategyCandidatesResponse>("/api/execution/paper/strategy-candidates"),
+  selectPaperStrategyCandidate: (strategyVersionId: string) => request<{
+    strategy_version_id: string;
+    backtest_report_sha256: string;
+    composition_ready: boolean;
+    deployment_mode: string;
+    order_submission_performed: false;
+  }>("/api/execution/paper/strategy-candidates/select", {
+    method: "POST",
+    body: JSON.stringify({ strategy_version_id: strategyVersionId }),
+  }),
+  runPaperIntegrationTest: () => request<PaperIntegrationTestResult>("/api/execution/paper/integration-test/run", { method: "POST" }),
+  startPaperExecution: (strategyVersionId: string) => request<PaperExecutionStatus>("/api/execution/paper/start", {
+    method: "POST",
+    body: JSON.stringify({ strategy_version_id: strategyVersionId }),
+  }),
+  activatePaperExecution: () => request<PaperExecutionStatus>("/api/execution/paper/activate", { method: "POST" }),
   paperExecutionActivityEventsUrl: (afterSeq: number) =>
     `${BASE}/api/execution/paper/activity/events?after_seq=${encodeURIComponent(String(afterSeq))}`,
   pausePaperExecution: () => request<PaperExecutionStatus>("/api/execution/paper/pause", { method: "POST" }),
@@ -602,6 +692,7 @@ export const api = {
       close_at: string;
       early_close?: boolean;
     }>;
+    ibkr_import_token?: string | null;
     provenance?: Record<string, unknown>;
     warnings?: string[];
   }>("/runs/market-data/ibkr/python-upload-preview", {
@@ -630,12 +721,16 @@ export const api = {
       evaluation_end: string;
       download_parameters: Record<string, unknown>;
     };
+    position_quantity: number;
+    execution_order_type: "market" | "limit";
+    limit_price_usd?: string;
     expected_sessions: Array<{
       session_date: string;
       open_at: string;
       close_at: string;
       early_close?: boolean;
     }>;
+    ibkr_import_token?: string;
     initial_cash: number;
     commission_rate: number;
     slippage_fraction: number;
@@ -665,6 +760,9 @@ export const api = {
     strategy_id: string;
     instrument_id: string;
     strategy_source: string;
+    position_quantity: number;
+    execution_order_type: "market" | "limit";
+    limit_price_usd?: string;
     initial_cash: number;
     commission_rate: number;
     slippage_fraction: number;

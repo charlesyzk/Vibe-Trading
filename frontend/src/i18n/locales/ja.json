@@ -6,6 +6,7 @@
     "paperLastErrorCode": "ランタイムの最新エラーコード",
     "paperMissingRequirementsTitle": "PAPER の準備を完了するために必要な項目",
     "paperRequirement": {
+      "ibkr_runtime_factory": "共有 Gateway アカウントに接続する IBKR PAPER ランタイム。",
       "strategy_session_builder": "承認済みで変更不可能な戦略バージョンを読み込むセッションビルダー。",
       "attributable_control_authorizer": "明示的な PAPER 運用権限に紐づいたオペレーター認可。",
       "account_reconciliation_facts": "ブローカー口座の識別情報、ポジション、未約定注文、照合証跡。",

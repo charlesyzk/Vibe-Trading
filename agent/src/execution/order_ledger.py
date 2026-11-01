@@ -76,6 +76,7 @@ class OrderIntentInput(StrictModel):
     integer_qty: int = Field(strict=True, gt=0)
     order_type: str = "market"
     time_in_force: str = "DAY"
+    limit_price: Decimal | None = None
     reference_price: Decimal
     eligible_at: datetime
     expires_at: datetime
@@ -104,8 +105,13 @@ class OrderIntentInput(StrictModel):
 
     @model_validator(mode="after")
     def supported_order_window(self) -> "OrderIntentInput":
-        if self.order_type != "market" or self.time_in_force != "DAY":
-            raise ValueError("only market DAY intents are supported")
+        if self.order_type not in {"market", "limit"} or self.time_in_force != "DAY":
+            raise ValueError("only market DAY and limit DAY intents are supported")
+        if self.order_type == "limit":
+            if self.limit_price is None or not self.limit_price.is_finite() or self.limit_price <= 0:
+                raise ValueError("limit DAY intents require a finite positive limit_price")
+        elif self.limit_price is not None:
+            raise ValueError("market DAY intents cannot specify limit_price")
         if self.expires_at <= self.eligible_at:
             raise ValueError("expires_at must be after eligible_at")
         return self
@@ -1037,6 +1043,7 @@ class SQLiteOrderLedger:
                 integer_qty=intent_data["integer_qty"],
                 order_type=intent_data["order_type"],
                 time_in_force=intent_data["time_in_force"],
+                limit_price=intent_data.get("limit_price"),
             )
             decision = evaluate_order_risk(grant, candidate, effective_facts)
             identity_reasons = []
@@ -1621,6 +1628,34 @@ class SQLiteOrderLedger:
         with closing(self._connect()) as connection:
             row = self._get_row(connection, intent_id)
             return OrderIntentInput.model_validate_json(row["body_json"])
+
+    def has_strategy_version_intent(
+        self,
+        *,
+        broker: str,
+        account_ref: str,
+        environment: Environment | str,
+        strategy_version_hash: str,
+        excluding_intent_id: str | None = None,
+    ) -> bool:
+        """Check durable order history for one exact strategy and PAPER scope."""
+        environment = Environment(environment)
+        if not broker or not account_ref or not strategy_version_hash:
+            raise ValueError("broker, account_ref, and strategy_version_hash are required")
+        sql = (
+            "SELECT 1 FROM order_intent WHERE json_extract(body_json, '$.broker')=? "
+            "AND json_extract(body_json, '$.account_ref')=? "
+            "AND json_extract(body_json, '$.environment')=? "
+            "AND json_extract(body_json, '$.strategy_version_hash')=?"
+        )
+        args: list[object] = [broker, account_ref, environment.value, strategy_version_hash]
+        if excluding_intent_id is not None:
+            sql += " AND intent_id<>?"
+            args.append(excluding_intent_id)
+        sql += " LIMIT 1"
+        with closing(self._connect()) as connection:
+            row = connection.execute(sql, tuple(args)).fetchone()
+        return row is not None
 
     def list_activity_for_scope(
         self, *, broker: str, account_ref: str, environment: Environment | str,

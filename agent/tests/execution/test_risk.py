@@ -85,6 +85,96 @@ def test_risk_applies_price_buffer_to_order_and_gross_limits():
     assert {"max_order_notional", "max_gross_exposure"}.issubset(decision.reason_codes)
 
 
+def test_limit_order_risk_uses_the_exact_limit_as_a_hard_notional_ceiling():
+    grant = make_grant(allowed_order_types=["limit"], max_order_notional="400")
+    order = ProposedOrder(
+        instrument_id="AAPL", side="BUY", integer_qty=1,
+        order_type="limit", limit_price=Decimal("400"),
+    )
+    decision = evaluate_order_risk(grant, order, make_facts(quote_price=Decimal("500")))
+    assert decision.allowed is True
+    assert decision.estimated_notional == Decimal("400")
+    assert decision.estimated_cost == Decimal("402")
+
+    capped = evaluate_order_risk(
+        make_grant(allowed_order_types=["limit"], max_order_notional="399"),
+        order,
+        make_facts(),
+    )
+    assert capped.allowed is False
+    assert "max_order_notional" in capped.reason_codes
+
+
+def test_broker_enforced_limit_mode_is_bound_to_the_single_aapl_paper_envelope():
+    grant = make_grant(
+        allowed_order_types=["limit"],
+        max_order_notional="400", max_gross_exposure="400", strategy_budget="400",
+        max_daily_loss="400", max_orders_per_session=1, quote_max_age_seconds=10,
+        account_max_age_seconds=10, account_ref="DU123456", funds_check="broker_paper_limit",
+    )
+    facts = make_facts(
+        quote_as_of=None, quote_price=None, net_liquidation=None, available_cash=None,
+        positions=(), strategy_position_qty=0, strategy_sell_reservations=0,
+        strategy_buy_reservations=Decimal("0"), account_buy_reservations=Decimal("0"),
+        strategy_daily_loss=Decimal("0"), orders_this_session=0,
+        estimated_fees=Decimal("1"),
+        account_ref="DU123456", price_buffer_fraction=Decimal("0.05"),
+    )
+    order = ProposedOrder(
+        instrument_id="AAPL", side="BUY", integer_qty=1,
+        order_type="limit", limit_price=Decimal("400"),
+    )
+
+    decision = evaluate_order_risk(grant, order, facts)
+
+    assert decision.allowed is True
+    assert decision.estimated_notional == Decimal("400")
+    assert decision.estimated_cost == Decimal("401")
+    assert decision.projected_strategy_exposure == Decimal("400")
+    assert decision.projected_gross_exposure == Decimal("400")
+
+
+def test_broker_enforced_limit_mode_rejects_other_orders_and_nonempty_account_state():
+    grant = make_grant(
+        allowed_order_types=["limit"],
+        max_order_notional="400", max_gross_exposure="400", strategy_budget="400",
+        max_daily_loss="400", max_orders_per_session=1, quote_max_age_seconds=10,
+        account_max_age_seconds=10, account_ref="DU123456", funds_check="broker_paper_limit",
+    )
+    facts = make_facts(
+        quote_as_of=None, quote_price=None, net_liquidation=None, available_cash=None,
+        positions=(), strategy_position_qty=0, strategy_sell_reservations=0,
+        strategy_buy_reservations=Decimal("0"), account_buy_reservations=Decimal("0"),
+        strategy_daily_loss=Decimal("0"), orders_this_session=0,
+        estimated_fees=Decimal("1"),
+        account_ref="DU123456", price_buffer_fraction=Decimal("0.05"),
+    )
+    result = evaluate_order_risk(
+        grant,
+        {"instrument_id": "AAPL", "side": "BUY", "integer_qty": 2,
+         "order_type": "limit", "limit_price": "400"},
+        facts,
+    )
+    assert result.allowed is False
+    assert "broker_limit_test_envelope_mismatch" in result.reason_codes
+
+    with pytest.raises(ValueError, match="exact one-shot AAPL PAPER envelope"):
+        make_grant(
+            allowed_order_types=["market"], max_order_notional="400", max_gross_exposure="400",
+            strategy_budget="400", max_daily_loss="400", max_orders_per_session=1,
+            quote_max_age_seconds=10, account_max_age_seconds=10, account_ref="DU123456",
+            funds_check="broker_paper_limit",
+        )
+
+    with pytest.raises(ValueError, match="exact one-shot AAPL PAPER envelope"):
+        make_grant(
+            broker="FAKE", allowed_order_types=["limit"], max_order_notional="400",
+            max_gross_exposure="400", strategy_budget="400", max_daily_loss="400",
+            max_orders_per_session=1, quote_max_age_seconds=10, account_max_age_seconds=10,
+            account_ref="DU123456", funds_check="broker_paper_limit",
+        )
+
+
 def test_risk_fails_closed_for_identity_staleness_incomplete_daily_loss_and_cash():
     grant = make_grant()
     order = {"instrument_id": "AAPL", "side": "BUY", "integer_qty": 4}

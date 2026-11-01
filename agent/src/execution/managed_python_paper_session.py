@@ -143,6 +143,7 @@ class ManagedPythonPaperSession:
         queue_size: int = 256,
         idle_poll_seconds: float = 0.05,
         now: Callable | None = None,
+        allow_unreported_usd_cash: bool = False,
     ) -> None:
         self.record = self._validate(
             runtime=runtime, run_id=run_id, version_store=version_store,
@@ -166,6 +167,9 @@ class ManagedPythonPaperSession:
         self.queue_size = queue_size
         self.idle_poll_seconds = idle_poll_seconds
         self.now = now or next(iter(feeds.values()))._now
+        if type(allow_unreported_usd_cash) is not bool:
+            raise TypeError("allow_unreported_usd_cash must be a bool")
+        self.allow_unreported_usd_cash = allow_unreported_usd_cash
         if isinstance(coordinator, PythonEventCoordinator):
             coordinator.bind_trusted_clock(self.now)
         self.callback_router = CallbackSinkRouter(capacity=queue_size)
@@ -470,6 +474,7 @@ class ManagedPythonPaperSession:
                 account_ref=self.runtime.account_ref,
                 environment=Environment.PAPER.value,
                 data_by_con_id=self.data_by_con_id,
+                allow_unreported_usd_cash=self.allow_unreported_usd_cash,
             )
             for state in self._reconciled_order_states(snapshot):
                 self.broker.restore_reconciled_order(state, data=self.feeds[state.instrument])
@@ -751,6 +756,14 @@ class ManagedPythonPaperSession:
         """Report the shared execution database as the manager's scope proof."""
         return self.runtime.durable_database_paths
 
+    def latest_reconciled_snapshot(self) -> dict[str, Any]:
+        """Expose only the managed runtime's current paused reconciliation proof."""
+        return self.runtime.latest_reconciled_snapshot()
+
+    def latest_reconciled_activity_snapshot(self) -> dict[str, Any]:
+        """Expose fresh reconciled broker facts for the activity surface."""
+        return self.runtime.latest_reconciled_activity_snapshot()
+
     def activate(self) -> None:
         """Open the durable send gate through the managed runtime."""
         with self._lock:
@@ -864,7 +877,9 @@ class ManagedPythonPaperSession:
             or intent.deployment_id != identity["deployment_id"]
             or intent.strategy_version_hash != self.record.version_hash
             or intent.side != "BUY"
-            or intent.order_type != "market"
+            or intent.order_type not in {"market", "limit"}
+            or (intent.order_type == "limit" and intent.limit_price is None)
+            or (intent.order_type == "market" and intent.limit_price is not None)
             or intent.time_in_force != "DAY"
             or intent.instrument_id not in self.feeds
             or type(intent.integer_qty) is not int
@@ -879,6 +894,8 @@ class ManagedPythonPaperSession:
             "side": intent.side,
             "quantity": intent.integer_qty,
             "reference_price": float(intent.reference_price),
+            "order_type": intent.order_type,
+            "limit_price": float(intent.limit_price) if intent.limit_price is not None else None,
         }]
 
     def _queue_recovered_created_intents(self, candidates: list[dict[str, Any]]) -> None:
@@ -893,6 +910,8 @@ class ManagedPythonPaperSession:
                     quantity=candidate["quantity"],
                     reference_price=candidate["reference_price"],
                     intent_id=candidate["intent_id"],
+                    order_type=candidate["order_type"],
+                    limit_price=candidate["limit_price"],
                 )
             except Exception as exc:
                 raise ManagedPythonPaperSessionError(
@@ -1030,6 +1049,9 @@ class ManagedPythonPaperSession:
                 or intent.account_ref != self.runtime.account_ref
                 or intent.environment is not Environment.PAPER
                 or intent.side != "BUY"
+                or intent.order_type not in {"market", "limit"}
+                or (intent.order_type == "limit" and intent.limit_price is None)
+                or (intent.order_type == "market" and intent.limit_price is not None)
                 or intent.deployment_id != run_identity["deployment_id"]
                 or intent.strategy_version_hash != self.record.version_hash
                 or binding.account_ref != self.runtime.account_ref
@@ -1103,6 +1125,8 @@ class ManagedPythonPaperSession:
                 position_size_after=position_size_after,
                 position_average_price_after=position_average_price_after,
                 fills=executions,
+                order_type=intent.order_type,
+                limit_price=float(intent.limit_price) if intent.limit_price is not None else None,
             ))
         return states
 

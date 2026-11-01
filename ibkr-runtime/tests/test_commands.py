@@ -25,6 +25,7 @@ def _order_payload() -> dict[str, object]:
             "quantity": 2,
             "order_type": "MKT",
             "time_in_force": "DAY",
+            "limit_price": None,
             "account_ref": "DU-TEST",
             "client_order_id": "attempt-test-73",
             "outside_rth": False,
@@ -55,7 +56,7 @@ class IsolatedSdkCommandTests(unittest.TestCase):
         for mutate in (
             lambda payload: payload.update(environment="live"),
             lambda payload: payload["order"].update(quantity=True),
-            lambda payload: payload["order"].update(order_type="LMT"),
+            lambda payload: payload["order"].update(order_type="LMT", limit_price=None),
             lambda payload: payload["contract"].update(currency="CAD"),
         ):
             payload = _order_payload()
@@ -63,6 +64,14 @@ class IsolatedSdkCommandTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 execute(self.owner, "place_order", payload)
         self.client.placeOrder.assert_not_called()
+
+    def test_place_limit_order_sets_exact_limit_price(self) -> None:
+        payload = _order_payload()
+        payload["order"].update(order_type="LMT", limit_price="400.00")
+        execute(self.owner, "place_order", payload)
+        order = self.client.placeOrder.call_args.args[2]
+        self.assertEqual(order.orderType, "LMT")
+        self.assertEqual(order.lmtPrice, 400.0)
 
     def test_cancel_uses_only_exact_positive_order_id(self) -> None:
         result = execute(self.owner, "cancel_order", {"broker_order_id": 73, "environment": "paper"})

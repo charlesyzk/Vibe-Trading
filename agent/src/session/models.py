@@ -26,16 +26,18 @@ class AuthMethod(str, Enum):
     SHARED_KEY = "shared_key"
     #: No key configured; the request came from loopback and was trusted.
     LOOPBACK_TRUST = "loopback_trust"
-    #: A named human authenticated through an identity provider. Not reachable
-    #: today -- listed so that ``attributable`` has a True case to grow into and
-    #: so downstream code branches on the enum rather than on a string it
-    #: invented.
+    #: A named human authenticated through an identity provider.
     FEDERATED_IDENTITY = "federated_identity"
+    #: A unique locally issued operator token bound to one named operator.
+    LOCAL_OPERATOR_TOKEN = "local_operator_token"
 
 
-#: Auth methods that can attribute an action to a named human. Everything else
-#: proves only that *somebody with the secret* acted.
-ATTRIBUTABLE_AUTH_METHODS: frozenset[AuthMethod] = frozenset({AuthMethod.FEDERATED_IDENTITY})
+#: Auth methods that can attribute an action to a named human. Shared-key and
+#: loopback methods only prove that *somebody with access* acted.
+ATTRIBUTABLE_AUTH_METHODS: frozenset[AuthMethod] = frozenset({
+    AuthMethod.FEDERATED_IDENTITY,
+    AuthMethod.LOCAL_OPERATOR_TOKEN,
+})
 
 
 @dataclass(frozen=True)
@@ -46,10 +48,10 @@ class Principal:
     traced to an actor. What it must never do is *manufacture* an identity the
     authentication layer could not establish.
 
-    Today the API authenticates with one process-wide static bearer key, or with
-    loopback dev-trust when no key is set. Under either, every request from
-    every person looks identical. :attr:`attributable` is therefore False, and
-    it stays False until an identity provider is wired in. Any control that
+    The API can authenticate with a process-wide static bearer key, loopback
+    dev-trust, a locally issued unique operator token, or a federated identity.
+    The first two prove access without naming a person. :attr:`attributable`
+    is therefore False for those methods. Any control that
     needs a named human -- four-eyes approval, a MiFID II recipient log, SEC
     17a-4 attribution -- must check ``attributable`` and refuse rather than
     quote ``subject`` as if it were a person.

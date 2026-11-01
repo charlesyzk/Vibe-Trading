@@ -6,6 +6,7 @@
     "paperLastErrorCode": "رمز آخر خطأ في بيئة التشغيل",
     "paperMissingRequirementsTitle": "ما المطلوب لإكمال جاهزية PAPER",
     "paperRequirement": {
+      "ibkr_runtime_factory": "تشغيل IBKR PAPER مخصص ومتصل بحساب Gateway المشترك.",
       "strategy_session_builder": "منشئ جلسة يحمل إصدار الاستراتيجية المعتمد وغير القابل للتغيير.",
       "attributable_control_authorizer": "تفويض مشغل مرتبط بتفويض PAPER صريح.",
       "account_reconciliation_facts": "هوية حساب الوسيط والمراكز والأوامر المفتوحة وأدلة التسوية.",

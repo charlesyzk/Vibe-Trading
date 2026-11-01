@@ -272,6 +272,7 @@ def test_api_lifespan_default_paper_composition_remains_inert(
 
     monkeypatch.setattr(api_server, "_run_startup_preflight", no_op)
     monkeypatch.setattr(api_server, "_stop_scheduled_research_on_shutdown", no_op)
+    monkeypatch.delenv("VIBE_PAPER_COMPOSITION_FACTORY", raising=False)
     target_app = FastAPI()
 
     async def scenario() -> None:
@@ -283,3 +284,62 @@ def test_api_lifespan_default_paper_composition_remains_inert(
             assert manager.status() is None
 
     asyncio.run(scenario())
+
+
+def test_api_lifespan_loads_explicit_paper_composition_factory_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import sys
+    import types
+
+    import api_server
+    from fastapi import FastAPI
+    from src.execution.paper_execution_composition import PaperExecutionComposition
+    from src.execution.paper_execution_manager import PaperExecutionManager, PaperRuntimeScope
+    from src.execution.paper_execution_readiness import PaperExecutionReadiness
+
+    calls: list[str] = []
+    async def no_op() -> None:
+        return None
+
+    monkeypatch.setattr(api_server, "_run_startup_preflight", no_op)
+    monkeypatch.setattr(api_server, "_stop_scheduled_research_on_shutdown", no_op)
+    module = types.ModuleType("test_paper_composition_extension")
+    runtime_factory = lambda *_args, **_kwargs: calls.append("runtime")
+    runtime_factory.strategy_version_id = "a" * 64
+    manager = PaperExecutionManager(runtime_factory=runtime_factory)
+    readiness = PaperExecutionReadiness()
+    scope = PaperRuntimeScope("IBKR", "DU1234567")
+    composition = PaperExecutionComposition(manager, readiness, scope)
+    module.build = lambda: calls.append("build") or composition
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setenv(
+        "VIBE_PAPER_COMPOSITION_FACTORY",
+        "test_paper_composition_extension:build",
+    )
+    target_app = FastAPI()
+
+    async def scenario() -> None:
+        async with api_server._lifespan(target_app):
+            assert target_app.state.paper_execution_manager is manager
+            assert target_app.state.paper_execution_readiness is readiness
+            assert target_app.state.paper_execution_scope is scope
+            assert target_app.state.paper_execution_composition is composition
+            assert manager.status() is None
+
+    asyncio.run(scenario())
+    assert calls == ["build"]
+
+
+def test_api_lifespan_rejects_invalid_configured_paper_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api_server
+    from fastapi import FastAPI
+
+    monkeypatch.setenv("VIBE_PAPER_COMPOSITION_FACTORY", "invalid reference")
+    target_app = FastAPI()
+
+    with pytest.raises(RuntimeError, match="trusted module:function"):
+        api_server._install_paper_execution_app_composition(target_app)

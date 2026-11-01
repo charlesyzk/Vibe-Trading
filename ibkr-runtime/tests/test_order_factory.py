@@ -25,6 +25,7 @@ def intent(**changes):
         "integer_qty": 3,
         "order_type": "market",
         "time_in_force": "DAY",
+        "limit_price": None,
     }
     values.update(changes)
     return SimpleNamespace(**values)
@@ -67,7 +68,9 @@ class IbapiOrderFactoryTests(unittest.TestCase):
         for bad_intent in (
             intent(environment="live"),
             intent(account_ref="DU-PAPER-2"),
-            intent(order_type="limit"),
+            intent(order_type="limit", limit_price=None),
+            intent(order_type="limit", limit_price="NaN"),
+            intent(order_type="limit", limit_price="Infinity"),
             intent(time_in_force="GTC"),
             intent(side="SHORT"),
             intent(integer_qty=1.5),
@@ -77,6 +80,10 @@ class IbapiOrderFactoryTests(unittest.TestCase):
             with self.subTest(bad_intent=bad_intent):
                 with self.assertRaises(ValueError):
                     self.factory.build(bad_intent, now=NOW)
+
+    def test_builds_limit_day_order_at_exact_cap(self) -> None:
+        _contract, order = self.factory.build(intent(order_type="limit", limit_price="400.00"), now=NOW)
+        self.assertEqual((order.orderType, order.tif, order.lmtPrice), ("LMT", "DAY", 400.0))
 
     def test_rejects_stale_or_future_verified_contract(self) -> None:
         stale_factory = IbapiOrderFactory(

@@ -34,11 +34,17 @@ class CallbackEvent:
 class SQLiteCallbackSpool:
     """Durable primitive callback spool shared with the trusted host service."""
 
-    def __init__(self, path: str | Path, *, max_event_bytes: int = 64 * 1024) -> None:
+    def __init__(
+        self, path: str | Path, *, max_event_bytes: int = 64 * 1024,
+        epoch_id: str | None = None,
+    ) -> None:
         if type(max_event_bytes) is not int or max_event_bytes < 1:
             raise ValueError("max_event_bytes must be a positive integer")
+        if epoch_id is not None and (not isinstance(epoch_id, str) or not epoch_id.strip()):
+            raise ValueError("epoch_id must be a non-empty string or None")
         self.path = str(path)
         self.max_event_bytes = max_event_bytes
+        self.epoch_id = epoch_id
         with closing(sqlite3.connect(self.path)) as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=FULL")
@@ -59,7 +65,10 @@ class SQLiteCallbackSpool:
             raise TypeError("callback spool only accepts normalized CallbackEvent values")
         payload_json = json.dumps(dict(event.payload), ensure_ascii=False, sort_keys=True,
                                   separators=(",", ":"), allow_nan=False)
-        body = json.dumps({"kind": event.kind, "payload": json.loads(payload_json)},
+        identity = {"kind": event.kind, "payload": json.loads(payload_json)}
+        if self.epoch_id is not None:
+            identity["epoch_id"] = self.epoch_id
+        body = json.dumps(identity,
                           ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         if len(body.encode("utf-8")) > self.max_event_bytes:
             raise ValueError("callback event exceeds durable spool byte limit")
@@ -124,6 +133,7 @@ class IbapiCallbackAdapter(EWrapper):
         self._snapshot_lock = Lock()
         self._snapshot_id: int | None = None
         self._snapshot_ends: set[str] = set()
+        self._last_completed_snapshot_id: int | None = None
         self.cancel_account_summary: Callable[[int], None] | None = None
         self.cancel_positions: Callable[[], None] | None = None
         if not callable(durable_sink):
@@ -190,6 +200,8 @@ class IbapiCallbackAdapter(EWrapper):
         )
 
     def openOrder(self, orderId: int, contract: Any, order: Any, orderState: Any) -> None:
+        order_type = str(getattr(order, "orderType", ""))
+        raw_limit_price = getattr(order, "lmtPrice", None)
         self._publish(
             "open_order",
             snapshot_id=self._active_snapshot_id(),
@@ -204,7 +216,8 @@ class IbapiCallbackAdapter(EWrapper):
             currency=str(getattr(contract, "currency", "")),
             action=str(getattr(order, "action", "")),
             quantity=str(getattr(order, "totalQuantity", "")),
-            order_type=str(getattr(order, "orderType", "")),
+            order_type=order_type,
+            limit_price=(str(raw_limit_price) if order_type == "LMT" else None),
             time_in_force=str(getattr(order, "tif", "")),
             outside_rth=bool(getattr(order, "outsideRth", False)),
             status=str(getattr(orderState, "status", "")),
@@ -276,6 +289,11 @@ class IbapiCallbackAdapter(EWrapper):
 
     def accountSummaryEnd(self, reqId: int) -> None:
         snapshot_id = self._active_snapshot_id()
+        if snapshot_id is None and int(reqId) == self._last_completed_snapshot_id:
+            # Some Gateway sessions repeat the just-completed summary end
+            # after the host has already released this snapshot correlation.
+            # It carries no new account fact and must not poison the next run.
+            return
         if snapshot_id is not None and int(reqId) != snapshot_id:
             self.overflowed.set()
             return
@@ -319,6 +337,7 @@ class IbapiCallbackAdapter(EWrapper):
                     "account_summary_end", "positions_end", "open_orders_end",
                 }
                 if complete:
+                    self._last_completed_snapshot_id = snapshot_id
                     self._snapshot_id = None
                     self._snapshot_ends.clear()
             else:

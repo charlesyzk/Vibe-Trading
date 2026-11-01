@@ -194,6 +194,52 @@ def test_loopback_requires_auth_when_api_key_configured(
     assert remote_bearer.status_code == 200
 
 
+def test_named_paper_operator_token_authenticates_an_attributable_principal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from fastapi import HTTPException
+    from fastapi.security import HTTPAuthorizationCredentials
+    from starlette.requests import Request
+
+    import src.api.security as security
+    import src.execution.paper_operator_tokens as operator_tokens
+    from src.session.models import AuthMethod
+
+    monkeypatch.setattr(operator_tokens, "get_runtime_root", lambda: tmp_path)
+    store = operator_tokens.PaperOperatorTokenStore(tmp_path / operator_tokens.DATABASE_NAME)
+    _token_id, token = store.issue("partner-alice")
+
+    def request(host: str = "203.0.113.10") -> Request:
+        return Request({
+            "type": "http", "http_version": "1.1", "method": "GET",
+            "scheme": "http", "path": "/api/execution/paper/status", "raw_path": b"/api/execution/paper/status",
+            "query_string": b"", "headers": [], "client": (host, 50000), "server": ("localhost", 80),
+        })
+
+    monkeypatch.setattr(security, "_configured_api_key", lambda: "shared-secret")
+    operator = security._validate_api_auth(
+        request=request(),
+        cred=HTTPAuthorizationCredentials(scheme="Bearer", credentials=token),
+    )
+    assert operator.subject == "partner-alice"
+    assert operator.auth_method is AuthMethod.LOCAL_OPERATOR_TOKEN
+    assert operator.attributable is True
+
+    shared = security._validate_api_auth(
+        request=request(),
+        cred=HTTPAuthorizationCredentials(scheme="Bearer", credentials="shared-secret"),
+    )
+    assert shared.attributable is False
+
+    with pytest.raises(HTTPException) as error:
+        security._validate_api_auth(
+            request=request(),
+            cred=HTTPAuthorizationCredentials(scheme="Bearer", credentials="vtpo_invalid"),
+        )
+    assert error.value.status_code == 401
+
+
 def test_interactive_docs_are_loopback_only_in_keyless_dev_mode() -> None:
     """Default docs work locally without exposing the schema to remote peers."""
     local = _local_client()

@@ -11,6 +11,7 @@
     "paperLastErrorCode": "Last runtime error code",
     "paperMissingRequirementsTitle": "What is needed to complete PAPER readiness",
     "paperRequirement": {
+      "ibkr_runtime_factory": "A PAPER-only IBKR runtime connected to the shared Gateway account.",
       "strategy_session_builder": "A session builder that loads the approved, immutable strategy version.",
       "attributable_control_authorizer": "An operator authorization linked to an explicit PAPER mandate.",
       "account_reconciliation_facts": "Broker account identity, positions, open orders, and reconciliation evidence.",
@@ -437,7 +438,7 @@
     "pythonPackageInstalled": "Python package installed",
     "pythonPackageNotInstalled": "Python package not installed",
     "localApiAccess": "Local API access",
-    "localApiAccessDesc": "For remote or private Web UI deployments, enter the server API key once in this browser. Localhost use can stay blank.",
+    "localApiAccessDesc": "Enter the server API key in this browser. PAPER strategy selection and controls require a named operator token, including on localhost.",
     "serverApiKey": "Server API key",
     "storedInBrowser": "Stored only in this browser. Leave blank to clear it.",
     "localApiKeySaved": "Local API key saved",

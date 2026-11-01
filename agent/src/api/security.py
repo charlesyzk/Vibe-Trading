@@ -476,11 +476,10 @@ def _validate_api_auth(
 
     Returns:
         The :class:`~src.session.models.Principal` the request authenticated as.
-        Both paths available today authorise without identifying, so the
-        returned principal has ``attributable=False``; a caller that needs a
-        named human must check that flag and refuse rather than read ``subject``
-        as a person. Previously this function returned None; the return value is
-        additive and every existing caller that ignores it is unaffected.
+        Shared-key and loopback paths authorize without identifying, while a
+        locally issued per-operator token resolves to its provisioned subject.
+        Previously this function returned None; the return value is additive
+        and every existing caller that ignores it is unaffected.
 
     Raises:
         HTTPException: 401 on a bad or missing credential, 403 for a non-local
@@ -492,9 +491,24 @@ def _validate_api_auth(
     api_key = _configured_api_key()
     if api_key:
         token = _auth_credential_from_header_or_query(cred, query_api_key, allow_query=allow_query)
-        if not token or not hmac.compare_digest(token, api_key):
-            raise HTTPException(status_code=401, detail="Invalid or missing API key")
-        return Principal(subject=SHARED_KEY_SUBJECT, auth_method=AuthMethod.SHARED_KEY)
+        if token and hmac.compare_digest(token, api_key):
+            return Principal(subject=SHARED_KEY_SUBJECT, auth_method=AuthMethod.SHARED_KEY)
+        if token:
+            from src.execution.paper_operator_tokens import authenticate_paper_operator_token
+
+            operator = authenticate_paper_operator_token(token)
+            if operator is not None:
+                return operator
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    token = cred.credentials if cred and cred.credentials else ""
+    if token:
+        from src.execution.paper_operator_tokens import authenticate_paper_operator_token
+
+        operator = authenticate_paper_operator_token(token)
+        if operator is not None:
+            return operator
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
 
     if _is_local_client(request):
         return Principal(subject=LOOPBACK_SUBJECT, auth_method=AuthMethod.LOOPBACK_TRUST)

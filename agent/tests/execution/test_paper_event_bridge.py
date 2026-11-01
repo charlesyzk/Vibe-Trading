@@ -88,7 +88,7 @@ def _bar(*, close="100"):
     )
 
 
-def _spec():
+def _spec(*, order_type="market"):
     return StrategySpec.model_validate({
         "schema_version": "1.0", "strategy_id": "bridge-test",
         "source_kind": SourceKind.PYTHON_UPLOAD.value, "source_artifact_id": "upload-1",
@@ -98,16 +98,16 @@ def _spec():
         "parameters": {},
         "position_policy": {"mode": "explicit_quantity", "long_only": True, "whole_shares": True},
         "execution_policy": {"decision": "completed_bar_available", "dispatch": "next_regular_session",
-                             "order_type": "market", "time_in_force": "DAY", "outside_rth": False,
+                             "order_type": order_type, "time_in_force": "DAY", "outside_rth": False,
                              "gap_action": "reject_and_pause", "missed_session_action": "expire_and_pause"},
     })
 
 
-def _setup(tmp_path, proposals, *, strategy_position_qty=0):
+def _setup(tmp_path, proposals, *, strategy_position_qty=0, order_type="market"):
     bar = _bar()
     versions = StrategyVersionStore(tmp_path / "versions")
     version = versions.create_version(
-        _spec(), upload_source=b"def on_event(event, state): return {}\n",
+        _spec(order_type=order_type), upload_source=b"def on_event(event, state): return {}\n",
         engine_version="backtrader/1.9.78.123", compiler_version="vibe-python-event/1",
     )
     journal = SQLiteEventJournal(tmp_path / "journal.sqlite")
@@ -139,6 +139,7 @@ def _setup(tmp_path, proposals, *, strategy_position_qty=0):
             bar_end=proposal.bar.end_at, instrument_id=proposal.bar.instrument_id,
             side=proposal.proposal["side"], integer_qty=proposal.proposal["integer_qty"],
             order_type=proposal.proposal["order_type"], time_in_force=proposal.proposal["time_in_force"],
+            limit_price=proposal.proposal.get("limit_price"),
             reference_price=proposal.bar.close, eligible_at=NOW, expires_at=NOW.replace(day=21),
             risk_snapshot_id="a" * 64,
         )
@@ -160,7 +161,7 @@ def _setup(tmp_path, proposals, *, strategy_position_qty=0):
         "grant_id": "grant-bridge", "user_action_id": "approval-bridge",
         "strategy_version_hash": version.version_hash, "broker": "IBKR",
         "account_ref": "paper-1", "environment": "paper", "allowed_instruments": ["AAPL"],
-        "allowed_order_types": ["market"], "long_only": True, "whole_shares": True,
+        "allowed_order_types": ["market", "limit"], "long_only": True, "whole_shares": True,
         "max_order_notional": "10000", "max_gross_exposure": "100000",
         "strategy_budget": "50000", "max_daily_loss": "1000", "max_orders_per_session": 10,
         "valid_from": NOW.replace(day=19), "valid_until": NOW.replace(day=21, hour=23),
@@ -203,7 +204,10 @@ def _setup(tmp_path, proposals, *, strategy_position_qty=0):
         assert index.resolve(kwargs["broker_order_id"]).intent_id == kwargs["intent_id"]
         sent.append((command, kwargs))
         execution_side = "BOT" if command.side == "BUY" else "SLD"
-        execution_price = "101" if command.side == "BUY" else "99"
+        execution_price = (
+            "99" if command.order_type == "limit" and command.side == "BUY"
+            else "101" if command.side == "BUY" else "99"
+        )
         events.put(SimpleNamespace(kind="execution", payload=tuple(sorted({
             "request_id": 1, "execution_id": "bridge-exec-1", "order_id": kwargs["broker_order_id"],
             "account": "paper-1", "side": execution_side, "shares": str(command.quantity), "price": execution_price,
@@ -259,6 +263,31 @@ def test_real_cerebro_event_bridge_routes_authorized_sell_to_native_order(tmp_pa
     assert sent[0][0] == BrokerOrderCommand(strategy.bridge_result.native_order.ref, "AAPL", "SELL", 2)
     assert strategy.bridge_result.native_order.status == strategy.bridge_result.native_order.Completed
     assert strategy.bridge_result.native_order.executed.size == -2
+    assert strategy.bridge_result.native_order.executed.price == pytest.approx(99.0)
+    assert ledger.get_order(intent_id).state is LocalOrderState.FILLED
+    service.close()
+
+
+def test_real_cerebro_event_bridge_preserves_limit_price_through_native_order_and_fill(tmp_path):
+    cerebro, _journal, ledger, service, _sandbox, _port, sent, _index = _setup(
+        tmp_path,
+        [{"side": "BUY", "integer_qty": 2, "order_type": "limit", "limit_price": "100.00",
+          "time_in_force": "DAY", "reason": "bounded-entry"}],
+        order_type="limit",
+    )
+
+    strategy = cerebro.run()[0]
+
+    intent_id = strategy.bridge_result.intent_id
+    assert intent_id
+    intent = ledger.get_intent(intent_id)
+    assert intent.order_type == "limit"
+    assert intent.limit_price == Decimal("100.00")
+    assert sent[0][0] == BrokerOrderCommand(
+        strategy.bridge_result.native_order.ref, "AAPL", "BUY", 2,
+        order_type="limit", limit_price=Decimal("100.00"),
+    )
+    assert strategy.bridge_result.native_order.exectype == bt.Order.Limit
     assert strategy.bridge_result.native_order.executed.price == pytest.approx(99.0)
     assert ledger.get_order(intent_id).state is LocalOrderState.FILLED
     service.close()

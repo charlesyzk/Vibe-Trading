@@ -76,7 +76,7 @@ def test_strategy_spec_freezes_supported_template_and_semantics():
         {"bar_policy": {"timeframe": "1d", "session": "regular", "completed_only": False, "calendar_id": "x", "timezone": "UTC"}},
         {"instrument_ids": ["A", "B"]},
         {"position_policy": {"mode": "target_fraction", "long_only": True, "whole_shares": True}},
-        {"execution_policy": {"decision": "completed_bar_available", "dispatch": "next_regular_session", "order_type": "limit", "time_in_force": "DAY", "outside_rth": False, "gap_action": "reject", "missed_session_action": "expire"}},
+        {"execution_policy": {"decision": "completed_bar_available", "dispatch": "next_regular_session", "order_type": "stop", "time_in_force": "DAY", "outside_rth": False, "gap_action": "reject", "missed_session_action": "expire"}},
     ],
 )
 def test_strategy_spec_rejects_unknown_or_unsupported_contract_values(change):

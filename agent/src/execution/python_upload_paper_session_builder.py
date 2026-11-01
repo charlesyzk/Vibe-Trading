@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -58,10 +59,14 @@ class PythonUploadPaperSessionBuilder:
         sandbox: PythonSandbox,
         feeds: Mapping[str, PaperCompletedBarFeed],
         data_by_con_id: Mapping[int, Any],
+        feed_factory: Callable[
+            [], tuple[Mapping[str, PaperCompletedBarFeed], Mapping[int, Any]]
+        ] | None = None,
         resolve_contract_identity: Callable[[str], ContractIdentity],
         now: Callable[[], datetime],
         queue_size: int = 256,
         idle_poll_seconds: float = 0.05,
+        allow_unreported_usd_cash: bool = False,
     ) -> None:
         if not isinstance(version_store, StrategyVersionStore):
             raise TypeError("version_store must be a trusted StrategyVersionStore")
@@ -80,6 +85,8 @@ class PythonUploadPaperSessionBuilder:
             raise TypeError("verified completed-bar feeds are required")
         if not isinstance(data_by_con_id, Mapping) or not data_by_con_id:
             raise TypeError("verified conId-to-feed mapping is required")
+        if feed_factory is not None and not callable(feed_factory):
+            raise TypeError("feed_factory must be callable or None")
         if not callable(resolve_contract_identity):
             raise TypeError("verified contract identity resolver is required")
         if not callable(now):
@@ -101,15 +108,22 @@ class PythonUploadPaperSessionBuilder:
         self.sandbox = sandbox
         self.feeds = dict(feeds)
         self.data_by_con_id = dict(data_by_con_id)
+        self.feed_factory = feed_factory
         self.resolve_contract_identity = resolve_contract_identity
         self.now = now
+        if type(allow_unreported_usd_cash) is not bool:
+            raise TypeError("allow_unreported_usd_cash must be a bool")
+        self.allow_unreported_usd_cash = allow_unreported_usd_cash
         self.queue_size = queue_size
         self.idle_poll_seconds = idle_poll_seconds
 
     def __call__(self, runtime, scope: PaperRuntimeScope) -> ManagedPythonPaperSession:
         self._validate_runtime(runtime, scope)
+        bind_runtime = getattr(self.dispatch_risk_facts, "bind_runtime", None)
+        if callable(bind_runtime):
+            bind_runtime(runtime)
         record = self._load_frozen_upload()
-        self._validate_feed_contracts(record)
+        feeds, data_by_con_id = self._build_session_feeds(record)
         database_path = self._shared_runtime_database_path(runtime)
 
         journal = SQLiteEventJournal(database_path)
@@ -130,6 +144,32 @@ class PythonUploadPaperSessionBuilder:
                 raise PythonUploadPaperSessionBuildError(
                     "proposal instrument differs from the frozen Python-upload version"
                 )
+            if (
+                not isinstance(proposal.proposal, Mapping)
+                or proposal.proposal.get("order_type", "market") != record.spec.execution_policy.order_type
+                or proposal.proposal.get("time_in_force", "DAY") != record.spec.execution_policy.time_in_force
+            ):
+                raise PythonUploadPaperSessionBuildError(
+                    "strategy proposal differs from the frozen execution policy"
+                )
+            expected_quantity = record.spec.parameters.get("quantity")
+            if expected_quantity is not None and proposal.proposal.get("integer_qty") != expected_quantity:
+                raise PythonUploadPaperSessionBuildError(
+                    "strategy proposal differs from the frozen explicit quantity"
+                )
+            expected_limit = record.spec.parameters.get("limit_price_usd")
+            if expected_limit is not None:
+                try:
+                    proposal_limit = Decimal(str(proposal.proposal.get("limit_price")))
+                    frozen_limit = Decimal(str(expected_limit))
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise PythonUploadPaperSessionBuildError(
+                        "strategy proposal has an invalid frozen limit price"
+                    ) from exc
+                if not proposal_limit.is_finite() or proposal_limit != frozen_limit:
+                    raise PythonUploadPaperSessionBuildError(
+                        "strategy proposal differs from the frozen limit price"
+                    )
             result = self.proposal_risk_inputs(proposal)
             self._validate_proposal_inputs(result, scope, record, proposal.bar.instrument_id)
             return result
@@ -175,12 +215,13 @@ class PythonUploadPaperSessionBuilder:
             coordinator=coordinator,
             handoff=handoff,
             dispatch=dispatch,
-            feeds=self.feeds,
-            data_by_con_id=self.data_by_con_id,
+            feeds=feeds,
+            data_by_con_id=data_by_con_id,
             resolve_contract_identity=self.resolve_contract_identity,
             queue_size=self.queue_size,
             idle_poll_seconds=self.idle_poll_seconds,
             now=self.now,
+            allow_unreported_usd_cash=self.allow_unreported_usd_cash,
         )
 
     def _load_frozen_upload(self) -> StrategyVersionRecord:
@@ -215,7 +256,7 @@ class PythonUploadPaperSessionBuilder:
                 or policy.timezone != "America/New_York"
                 or execution.decision != "completed_bar_available"
                 or execution.dispatch != "next_regular_session"
-                or execution.order_type != "market"
+                or execution.order_type not in {"market", "limit"}
                 or execution.time_in_force != "DAY"
                 or execution.outside_rth is not False
                 or execution.gap_action != "reject_and_pause"
@@ -257,13 +298,42 @@ class PythonUploadPaperSessionBuilder:
         if runtime.callback_worker.alive:
             raise PythonUploadPaperSessionBuildError("runtime callback worker must be stopped during composition")
 
-    def _validate_feed_contracts(self, record: StrategyVersionRecord) -> None:
+    def _build_session_feeds(
+        self, record: StrategyVersionRecord,
+    ) -> tuple[dict[str, PaperCompletedBarFeed], dict[int, Any]]:
+        if self.feed_factory is None:
+            feeds = self.feeds
+            data_by_con_id = self.data_by_con_id
+        else:
+            try:
+                feeds_value, data_value = self.feed_factory()
+            except Exception as exc:
+                raise PythonUploadPaperSessionBuildError(
+                    "trusted completed-bar feed factory failed"
+                ) from exc
+            if not isinstance(feeds_value, Mapping) or not isinstance(data_value, Mapping):
+                raise PythonUploadPaperSessionBuildError(
+                    "trusted completed-bar feed factory returned invalid mappings"
+                )
+            feeds = dict(feeds_value)
+            data_by_con_id = dict(data_value)
+        self._validate_feed_contracts(record, feeds, data_by_con_id)
+        return dict(feeds), dict(data_by_con_id)
+
+    def _validate_feed_contracts(
+        self,
+        record: StrategyVersionRecord,
+        feeds: Mapping[str, PaperCompletedBarFeed] | None = None,
+        data_by_con_id: Mapping[int, Any] | None = None,
+    ) -> None:
+        feeds = self.feeds if feeds is None else feeds
+        data_by_con_id = self.data_by_con_id if data_by_con_id is None else data_by_con_id
         instrument = record.spec.instrument_ids[0]
-        if set(self.feeds) != {instrument}:
+        if set(feeds) != {instrument}:
             raise PythonUploadPaperSessionBuildError(
                 "managed Python-upload PAPER requires exactly the frozen instrument feed"
             )
-        feed = self.feeds[instrument]
+        feed = feeds[instrument]
         if (
             not isinstance(feed, PaperCompletedBarFeed)
             or feed.p.instrument_id != instrument
@@ -282,8 +352,8 @@ class PythonUploadPaperSessionBuilder:
             or contract.symbol != instrument
             or contract.security_type != "STK"
             or contract.currency != "USD"
-            or self.data_by_con_id.get(contract.contract_id) is not feed
-            or set(self.data_by_con_id) != {contract.contract_id}
+            or data_by_con_id.get(contract.contract_id) is not feed
+            or set(data_by_con_id) != {contract.contract_id}
         ):
             raise PythonUploadPaperSessionBuildError(
                 "frozen instrument lacks one verified USD stock contract/feed mapping"

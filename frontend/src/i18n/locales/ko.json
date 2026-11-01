@@ -6,6 +6,7 @@
     "paperLastErrorCode": "최근 런타임 오류 코드",
     "paperMissingRequirementsTitle": "PAPER 준비를 완료하는 데 필요한 항목",
     "paperRequirement": {
+      "ibkr_runtime_factory": "공유 Gateway 계정에 연결된 IBKR PAPER 런타임.",
       "strategy_session_builder": "승인된 불변 전략 버전을 불러오는 세션 빌더.",
       "attributable_control_authorizer": "명시적인 PAPER 위임에 연결된 운영자 권한.",
       "account_reconciliation_facts": "브로커 계정 식별 정보, 포지션, 미체결 주문 및 대사 증거.",

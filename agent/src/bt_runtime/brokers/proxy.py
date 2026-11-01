@@ -51,6 +51,21 @@ class BrokerOrderCommand:
     quantity: int
     order_type: str = "market"
     time_in_force: str = "DAY"
+    limit_price: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if self.order_type not in {"market", "limit"} or self.time_in_force != "DAY":
+            raise ValueError("broker commands support market/limit DAY orders only")
+        if self.order_type == "limit":
+            try:
+                price = Decimal(str(self.limit_price))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValueError("limit commands require a finite positive limit price") from exc
+            if not price.is_finite() or price <= 0:
+                raise ValueError("limit commands require a finite positive limit price")
+            object.__setattr__(self, "limit_price", price)
+        elif self.limit_price is not None:
+            raise ValueError("market commands cannot include a limit price")
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,8 +155,18 @@ class ReconciledOrderState:
     position_size_after: int
     position_average_price_after: float
     fills: tuple[ReconciledFill, ...] = ()
+    order_type: str = "market"
+    limit_price: float | None = None
 
     def __post_init__(self) -> None:
+        if self.order_type not in {"market", "limit"}:
+            raise ValueError("reconciled order type must be market or limit")
+        if self.order_type == "limit":
+            if self.limit_price is None or not math.isfinite(float(self.limit_price)) or float(self.limit_price) <= 0:
+                raise ValueError("reconciled limit order requires a finite positive limit price")
+            object.__setattr__(self, "limit_price", float(self.limit_price))
+        elif self.limit_price is not None:
+            raise ValueError("reconciled market order cannot include a limit price")
         for name in ("order_ref", "requested_qty"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -300,6 +325,7 @@ class PortBroker(bt.BrokerBase):
         self._seen_event_ids: dict[str, BrokerCallback] = {}
         self._positions: defaultdict[bt.LineSeries, Position] = defaultdict(Position)
         self._cash = float(self.p.initial_cash)
+        self._cash_authoritative = True
         self.startingcash = self._cash
         self._callback_error: BaseException | None = None
         self._lifecycle_lock = threading.RLock()
@@ -311,12 +337,13 @@ class PortBroker(bt.BrokerBase):
             raise TypeError("on_broker_cycle must be callable")
         self._recovered_dispatch_ready = recovered_dispatch_ready
         self._on_broker_cycle = on_broker_cycle
-        self._recovered_intents: deque[tuple[Any, str, str, int, float, str]] = deque()
+        self._recovered_intents: deque[tuple[Any, str, str, int, float, str, str, float | None]] = deque()
         self._recovered_intent_ids: set[str] = set()
 
     def queue_recovered_intent(
         self, *, data: Any, instrument: str, side: str, quantity: int,
-        reference_price: float, intent_id: str,
+        reference_price: float, intent_id: str, order_type: str = "market",
+        limit_price: float | None = None,
     ) -> None:
         """Stage one exact CREATED intent for explicit post-recovery activation.
 
@@ -331,9 +358,18 @@ class PortBroker(bt.BrokerBase):
             raise ValueError("recovered intent requires a supported side and positive whole-share quantity")
         if not math.isfinite(float(reference_price)) or reference_price <= 0:
             raise ValueError("recovered intent requires a finite positive reference price")
+        if order_type not in {"market", "limit"}:
+            raise ValueError("recovered intent must be market or limit")
+        if order_type == "limit":
+            if limit_price is None or not math.isfinite(float(limit_price)) or limit_price <= 0:
+                raise ValueError("recovered limit intent requires a finite positive limit price")
+            limit_price = float(limit_price)
+        elif limit_price is not None:
+            raise ValueError("recovered market intent cannot include a limit price")
         if not isinstance(intent_id, str) or not intent_id or intent_id in self._recovered_intent_ids:
             raise ValueError("recovered intent id is invalid or duplicated")
-        self._recovered_intents.append((data, instrument, side, quantity, float(reference_price), intent_id))
+        self._recovered_intents.append((data, instrument, side, quantity, float(reference_price), intent_id,
+                                        order_type, limit_price))
         self._recovered_intent_ids.add(intent_id)
 
     def start(self) -> None:
@@ -351,6 +387,7 @@ class PortBroker(bt.BrokerBase):
         account_ref: str,
         environment: str,
         data_by_con_id: Mapping[int, Any],
+        allow_unreported_usd_cash: bool = False,
     ) -> None:
         """Restore initial cash and positions from a verified PAPER snapshot.
 
@@ -367,6 +404,8 @@ class PortBroker(bt.BrokerBase):
                 raise ValueError("account_ref is required")
             if environment != "paper":
                 raise ValueError("PortBroker snapshot hydration accepts PAPER only")
+            if type(allow_unreported_usd_cash) is not bool:
+                raise TypeError("allow_unreported_usd_cash must be a bool")
             if (
                 snapshot.get("account_ref") != account_ref
                 or snapshot.get("environment") != "paper"
@@ -405,6 +444,7 @@ class PortBroker(bt.BrokerBase):
 
             cash_rows = []
             summary_tags: set[str] = set()
+            summary_currencies: set[str] = set()
             for row in summary:
                 if not isinstance(row, Mapping):
                     raise ValueError("account summary row must be a mapping")
@@ -416,18 +456,39 @@ class PortBroker(bt.BrokerBase):
                 tag = row.get("tag")
                 if tag not in {"NetLiquidation", "TotalCashValue", "AvailableFunds"}:
                     raise ValueError("snapshot contains an unsupported account summary tag")
-                if row.get("currency") != "USD":
-                    raise ValueError("snapshot account summary must use USD")
+                currency = row.get("currency")
+                if not isinstance(currency, str) or len(currency) != 3 or not currency.isascii() or not currency.isalpha():
+                    raise ValueError("snapshot account summary currency is malformed")
+                summary_currencies.add(currency)
                 if tag in summary_tags:
                     raise ValueError("snapshot repeats an account summary tag")
                 summary_tags.add(tag)
                 self._snapshot_decimal(row.get("value"), f"{tag} value")
-                if tag == "TotalCashValue":
+                if tag == "TotalCashValue" and currency == "USD":
                     cash_rows.append(row)
-            if summary_tags != {"NetLiquidation", "TotalCashValue", "AvailableFunds"} or len(cash_rows) != 1:
-                raise ValueError("snapshot must contain exactly one of each required USD account summary tag")
-            cash = self._snapshot_decimal(cash_rows[0].get("value"), "TotalCashValue")
-            cash_value = float(cash)
+            if summary_tags != {"NetLiquidation", "TotalCashValue", "AvailableFunds"}:
+                raise ValueError("snapshot must contain exactly one of each required account summary tag")
+            if summary_currencies == {"USD"} and len(cash_rows) == 1:
+                cash = self._snapshot_decimal(cash_rows[0].get("value"), "TotalCashValue")
+                cash_value = float(cash)
+                cash_authoritative = True
+            elif (
+                allow_unreported_usd_cash
+                and len(summary_currencies) == 1
+                and "USD" not in summary_currencies
+                and not positions
+                and not open_orders
+                and not cash_rows
+            ):
+                # Backtrader needs a numeric broker cash value to construct a
+                # native order. Zero here is an internal non-authoritative
+                # placeholder; the fixed PAPER limit-order risk policy defers
+                # buying-power acceptance to IBKR and never reports this as USD
+                # account cash.
+                cash_value = 0.0
+                cash_authoritative = False
+            else:
+                raise ValueError("snapshot must contain USD cash facts or an explicitly permitted broker-enforced limit scope")
             if not math.isfinite(cash_value):
                 raise ValueError("TotalCashValue is outside the supported numeric range")
 
@@ -480,8 +541,14 @@ class PortBroker(bt.BrokerBase):
             # cannot leave a partially hydrated broker.
             self._cash = cash_value
             self.startingcash = cash_value
+            self._cash_authoritative = cash_authoritative
             self._positions = defaultdict(Position, restored_positions)
             self._snapshot_hydrated = True
+
+    @property
+    def cash_is_authoritative(self) -> bool:
+        """Whether getcash() reflects a USD value explicitly reported by IBKR."""
+        return self._cash_authoritative
 
     def _assert_hydration_idle(self) -> None:
         if self._start_called:
@@ -541,9 +608,9 @@ class PortBroker(bt.BrokerBase):
                 owner=owner,
                 data=data,
                 size=state.requested_qty,
-                exectype=bt.Order.Market,
+                exectype=bt.Order.Limit if state.order_type == "limit" else bt.Order.Market,
                 simulated=True,
-                price=state.reference_price,
+                price=float(state.limit_price) if state.limit_price is not None else state.reference_price,
             )
             # Order.ref is an instance field in the locked Backtrader version.
             # Retaining the durable ref keeps callback and cancel bindings exact.
@@ -763,10 +830,33 @@ class PortBroker(bt.BrokerBase):
 
     @staticmethod
     def _command(order: bt.Order) -> BrokerOrderCommand:
-        if order.exectype not in (None, order.Market):
-            raise ValueError("V1 broker proxy supports market orders only")
-        if order.valid not in (None, bt.Order.DAY):
-            raise ValueError("V1 broker proxy supports DAY orders only")
+        if order.exectype in (None, order.Market):
+            order_type = "market"
+            limit_price = None
+        elif order.exectype == order.Limit:
+            order_type = "limit"
+            try:
+                limit_price = Decimal(str(order.created.price))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValueError("limit order requires a finite positive limit price") from exc
+            if not limit_price.is_finite() or limit_price <= 0:
+                raise ValueError("limit order requires a finite positive limit price")
+        else:
+            raise ValueError("V1 broker proxy supports market and limit orders only")
+        if order.valid is not None:
+            # Backtrader converts Order.DAY to a numeric end-of-day timestamp
+            # in Order.__init__. Accept only that exact representation for
+            # the current feed session; arbitrary expiry dates are unsupported.
+            try:
+                expiry = bt.num2date(order.valid)
+                session_day = order.data.datetime.datetime(0).date()
+            except (TypeError, ValueError, AttributeError, IndexError) as exc:
+                raise ValueError("V1 broker proxy supports DAY orders only") from exc
+            if (
+                expiry.date() != session_day or expiry.hour != 23 or expiry.minute != 59
+                or expiry.second != 59 or expiry.microsecond < 9000
+            ):
+                raise ValueError("V1 broker proxy supports DAY orders only")
         if order.oco is not None or order.parent is not None:
             raise ValueError("V1 broker proxy does not support linked orders")
         if order.trailamount is not None or order.trailpercent is not None:
@@ -776,6 +866,8 @@ class PortBroker(bt.BrokerBase):
             instrument=order.data._name or str(order.data),
             side="BUY" if order.isbuy() else "SELL",
             quantity=abs(int(order.created.size)),
+            order_type=order_type,
+            limit_price=limit_price,
         )
 
     def next(self) -> None:
@@ -827,16 +919,18 @@ class PortBroker(bt.BrokerBase):
         if not self._recovered_dispatch_ready():
             return
         while self._recovered_intents:
-            data, instrument, side, quantity, reference_price, intent_id = self._recovered_intents[0]
+            (data, instrument, side, quantity, reference_price, intent_id,
+             order_type, limit_price) = self._recovered_intents[0]
             bind = getattr(self.port, "bind_recovered_intent", None)
             if bind is None:
                 raise RuntimeError("trusted port does not support recovered intent binding")
+            params = {"owner": None, "data": data, "size": quantity, "simulated": True}
+            if order_type == "limit":
+                params.update({"price": limit_price, "exectype": bt.Order.Limit, "valid": bt.Order.DAY})
+            else:
+                params["price"] = reference_price
             with bind(intent_id):
-                order = self.buy(
-                    owner=None, data=data, size=quantity, price=reference_price, simulated=True,
-                ) if side == "BUY" else self.sell(
-                    owner=None, data=data, size=quantity, price=reference_price, simulated=True,
-                )
+                order = self.buy(**params) if side == "BUY" else self.sell(**params)
             if order.status == order.Rejected:
                 raise PortOrderRejected(
                     f"recovered intent {intent_id} was rejected: "

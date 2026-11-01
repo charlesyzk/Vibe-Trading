@@ -79,8 +79,17 @@ class RiskAwareProposalAuthorizer:
             integer_qty=proposal.proposal["integer_qty"],
             order_type=proposal.proposal["order_type"],
             time_in_force=proposal.proposal["time_in_force"],
+            limit_price=proposal.proposal.get("limit_price"),
         )
         decision = evaluate_order_risk(inputs.grant, candidate, inputs.facts)
+        reference_price = inputs.facts.quote_price
+        if reference_price is None and inputs.grant.funds_check == "broker_paper_limit":
+            # The order limit is the only safe native Backtrader price anchor
+            # in this explicitly capped one-shot PAPER mode. It is not stored
+            # or described as a market quote in RiskFacts.
+            reference_price = candidate.limit_price
+        if reference_price is None:
+            reference_price = Decimal("0")
         identity = proposal.identity
         identity_reasons = []
         if inputs.grant.account_ref != identity["account_ref"]:
@@ -116,7 +125,7 @@ class RiskAwareProposalAuthorizer:
                 intent=None,
                 decision=decision,
                 broker=inputs.grant.broker,
-                reference_price=inputs.facts.quote_price,
+                reference_price=reference_price,
             )
 
         eligible_at = inputs.eligible_at
@@ -142,7 +151,8 @@ class RiskAwareProposalAuthorizer:
             integer_qty=candidate.integer_qty,
             order_type=candidate.order_type,
             time_in_force=candidate.time_in_force,
-            reference_price=inputs.facts.quote_price,
+            limit_price=candidate.limit_price,
+            reference_price=reference_price,
             eligible_at=eligible_at,
             expires_at=expires_at,
             risk_snapshot_id=decision.risk_snapshot_id,
@@ -151,7 +161,7 @@ class RiskAwareProposalAuthorizer:
             intent=intent,
             decision=decision,
             broker=inputs.grant.broker,
-            reference_price=inputs.facts.quote_price,
+            reference_price=reference_price,
         )
 
 
@@ -300,6 +310,10 @@ class PythonOutboxIntentHandoff:
             "integer_qty": proposal.proposal["integer_qty"],
             "order_type": proposal.proposal["order_type"],
             "time_in_force": proposal.proposal["time_in_force"],
+            "limit_price": (
+                None if proposal.proposal.get("limit_price") is None
+                else Decimal(str(proposal.proposal["limit_price"]))
+            ),
         }
         actual = {
             "decision_id": intent.decision_id,
@@ -314,13 +328,14 @@ class PythonOutboxIntentHandoff:
             "integer_qty": intent.integer_qty,
             "order_type": intent.order_type,
             "time_in_force": intent.time_in_force,
+            "limit_price": intent.limit_price,
         }
         if actual != expected:
             raise OutboxDispatchError("authorized intent does not match host identity and worker proposal")
         if intent.broker != authorized.broker:
             raise OutboxDispatchError("intent broker does not match the authorizing grant")
         if intent.reference_price != authorized.reference_price:
-            raise OutboxDispatchError("intent reference price does not match the authorized quote")
+            raise OutboxDispatchError("intent reference price does not match the authorized price anchor")
         if intent.instrument_id != proposal.bar.instrument_id:
             raise OutboxDispatchError("authorized instrument does not match the staged bar")
         if intent.reference_price <= 0 or not intent.risk_snapshot_id:

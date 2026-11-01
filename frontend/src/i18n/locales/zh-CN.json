@@ -6,6 +6,7 @@
     "paperLastErrorCode": "运行时错误代码",
     "paperMissingRequirementsTitle": "完成 PAPER 就绪检查还需要",
     "paperRequirement": {
+      "ibkr_runtime_factory": "连接共用 Gateway 账户的 IBKR PAPER 运行时。",
       "strategy_session_builder": "策略会话构建器：加载已批准且不可变的策略版本。",
       "attributable_control_authorizer": "与明确 PAPER 授权绑定的操作员身份验证。",
       "account_reconciliation_facts": "券商账户身份、持仓、未完成委托及对账证据。",
@@ -432,7 +433,7 @@
     "saveModelProfile": "保存模型能力",
     "modelProfileSaved": "模型能力已保存",
     "localApiAccess": "本地 API 访问",
-    "localApiAccessDesc": "对远程或专用 Web UI 部署，请在浏览器中输入一次服务器 API 密钥。本地主机（localhost）使用可保持为空。",
+    "localApiAccessDesc": "在此浏览器输入服务器 API 密钥。使用 PAPER 策略选择或控制操作时，即使在 localhost 也需要输入具名操作员 token。",
     "serverApiKey": "服务器 API 密钥",
     "storedInBrowser": "仅存储在此浏览器中。留空以清除它。",
     "localApiKeySaved": "本地 API 密钥已保存",

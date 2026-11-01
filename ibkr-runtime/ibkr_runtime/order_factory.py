@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -37,7 +38,7 @@ class VerifiedStockContract:
 
 
 class IbapiOrderFactory:
-    """Build exact MKT/DAY SDK objects after intent and contract-map checks."""
+    """Build exact MKT/DAY or LMT/DAY SDK objects after scope checks."""
 
     def __init__(
         self,
@@ -66,8 +67,19 @@ class IbapiOrderFactory:
             raise ValueError("official order factory is paper-only")
         if getattr(intent, "account_ref", None) != self.account_ref:
             raise ValueError("intent account differs from configured paper account")
-        if getattr(intent, "order_type", None) != "market" or getattr(intent, "time_in_force", None) != "DAY":
-            raise ValueError("V1 supports Market/DAY orders only")
+        order_type = getattr(intent, "order_type", None)
+        limit_price = getattr(intent, "limit_price", None)
+        if order_type not in {"market", "limit"} or getattr(intent, "time_in_force", None) != "DAY":
+            raise ValueError("V1 supports Market/DAY and Limit/DAY orders only")
+        if order_type == "limit":
+            try:
+                limit_price = float(limit_price)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Limit/DAY requires a positive limit_price") from exc
+            if not math.isfinite(limit_price) or limit_price <= 0:
+                raise ValueError("Limit/DAY requires a positive limit_price")
+        elif limit_price is not None:
+            raise ValueError("Market/DAY cannot specify limit_price")
         side = getattr(intent, "side", None)
         quantity = getattr(intent, "integer_qty", None)
         if side not in {"BUY", "SELL"}:
@@ -94,7 +106,9 @@ class IbapiOrderFactory:
         order = Order()
         order.action = side
         order.totalQuantity = quantity
-        order.orderType = "MKT"
+        order.orderType = "LMT" if order_type == "limit" else "MKT"
+        if order_type == "limit":
+            order.lmtPrice = limit_price
         order.tif = "DAY"
         order.account = self.account_ref
         order.outsideRth = False

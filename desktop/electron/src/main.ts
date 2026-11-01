@@ -18,6 +18,7 @@ import {
   resolveDesktopLocale,
 } from "./locales";
 import { SecureCredentialStore } from "./secure-credentials";
+import { applyBackendAuthorization } from "./request-authorization";
 
 let mainWindow: BrowserWindow | undefined;
 let backend: BackendManager | undefined;
@@ -91,7 +92,7 @@ function createWindow(): void {
       const backendOrigin = backend?.url ? new URL(backend.url).origin : undefined;
       const requestOrigin = safeOrigin(details.url);
       if (backendOrigin && requestOrigin === backendOrigin) {
-        details.requestHeaders.Authorization = `Bearer ${apiAuthKey}`;
+        applyBackendAuthorization(details.requestHeaders, apiAuthKey, details.url);
       }
       callback({ requestHeaders: details.requestHeaders });
     },

@@ -69,6 +69,10 @@ therefore security-significant.
   configuration, or renderer storage.
 - Electron adds `Authorization: Bearer <secret>` only when the request origin
   exactly matches the active backend origin.
+- An explicitly supplied `Bearer vtpo_…` operator token is preserved for PAPER
+  routes on that same origin so the backend can attribute controls; it validates
+  the token and its action grants. Other supplied authorization values fall
+  back to the desktop's internal key, and duplicate header names are removed.
 - Health and shutdown requests are authenticated.
 - A new desktop process receives a new secret, so any stale value is invalid
   after exit.

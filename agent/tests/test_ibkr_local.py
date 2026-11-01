@@ -38,7 +38,27 @@ class _FakeStock(_FakeContract):
         self.localSymbol = symbol
 
 
+class _FakeEvent:
+    def __init__(self) -> None:
+        self.handlers = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+    def __isub__(self, handler):
+        self.handlers.remove(handler)
+        return self
+
+    def emit(self, *args) -> None:
+        for handler in tuple(self.handlers):
+            handler(*args)
+
+
 class _FakeIB:
+    def __init__(self):
+        self.errorEvent = _FakeEvent()
+
     def connect(self, host, port, *, clientId, timeout, readonly=True, account=""):
         self.host = host
         self.port = port
@@ -202,6 +222,24 @@ def test_service_uses_persisted_ibkr_local_config(
     assert cfg.port == 4002
     assert cfg.client_id == 123
     assert cfg.account == "DU999"
+
+
+def test_quote_service_can_explicitly_request_live_market_data_without_changing_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A read-only quote call may request live tier and observe entitlement failures."""
+    from src.trading import service
+
+    monkeypatch.setattr(local, "get_runtime_root", lambda: tmp_path)
+    local.save_config(local.IBKRLocalConfig(profile="paper", port=4002, market_data_type=3))
+    with patch.object(local, "get_quote", return_value={"status": "no_data"}) as read_quote:
+        assert service.get_quote("AAPL", "ibkr-paper-local", port=4002, market_data_type=1)["status"] == "no_data"
+
+    cfg = read_quote.call_args.kwargs["config"]
+    assert cfg.profile == "paper"
+    assert cfg.port == 4002
+    assert cfg.market_data_type == 1
+    assert cfg.readonly is True
 
 
 def test_cli_connector_routes_to_handler() -> None:
@@ -383,7 +421,9 @@ def test_quote_selects_tier_before_requesting_data(monkeypatch: pytest.MonkeyPat
 
         def reqMktData(self, contract, genericTickList, snapshot, regulatorySnapshot):
             calls.append(("mktdata", contract.symbol))
-            return SimpleNamespace(bid=1.0, ask=1.1, last=1.05, close=1.0, volume=1, time="")
+            return SimpleNamespace(
+                bid=1.0, ask=1.1, last=1.05, close=1.0, volume=1, time="", marketDataType=4,
+            )
 
     _install_fake_ib(monkeypatch, _TierIB)
 
@@ -392,7 +432,68 @@ def test_quote_selects_tier_before_requesting_data(monkeypatch: pytest.MonkeyPat
     assert calls == [("tier", 4), ("mktdata", "AAPL")], calls
     assert result["market_data_type_requested"] == "delayed-frozen"
     assert result["market_data_type_applied"] == "delayed-frozen"
+    assert result["market_data_type_actual"] == "delayed-frozen"
+    assert result["market_data_type_actual_code"] == 4
+    assert result["quote_quality"] == "two_sided"
+    assert result["execution_ready"] is False
+    assert result["qualified_contract"]["con_id"] == 101
+    assert result["qualified_contract"]["currency"] == "USD"
+    assert result["observed_at_utc"].endswith("+00:00")
     assert "warning" not in result
+
+
+def test_quote_returns_market_data_subscription_error_codes(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _UnentitledIB(_FakeIB):
+        last_event = None
+
+        def __init__(self):
+            super().__init__()
+            type(self).last_event = self.errorEvent
+
+        def reqMktData(self, contract, genericTickList, snapshot, regulatorySnapshot):
+            self.errorEvent.emit(4, 10168, "No market data subscription; delayed data is not enabled", contract)
+            return SimpleNamespace(
+                bid=None, ask=None, last=None, close=None, volume=None, time="", marketDataType=1,
+            )
+
+    _install_fake_ib(monkeypatch, _UnentitledIB)
+    monkeypatch.setattr(local, "_wait_for_tick", lambda *_args: False)
+
+    result = local.get_quote(
+        "AAPL", config=local.IBKRLocalConfig(profile="paper", market_data_type=1),
+    )
+
+    assert result["status"] == "no_data"
+    assert result["market_data_errors"] == [{
+        "code": 10168,
+        "message": "No market data subscription; delayed data is not enabled",
+    }]
+    assert result["error"] == "IBKR reports unavailable market-data subscription (code 10168)."
+    assert not _UnentitledIB.last_event.handlers
+
+
+def test_quote_marks_actual_data_tier_unknown_when_gateway_does_not_report_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NoTierIB(_FakeIB):
+        def reqMktData(self, contract, genericTickList, snapshot, regulatorySnapshot):
+            return SimpleNamespace(bid=1.0, ask=1.1, last=1.05, close=1.0, volume=1, time="")
+
+    _install_fake_ib(monkeypatch, _NoTierIB)
+    result = local.get_quote("AAPL", config=local.IBKRLocalConfig(profile="paper"))
+    assert result["status"] == "ok"
+    assert result["market_data_type_actual"] is None
+    assert result["market_data_type_actual_code"] is None
+    assert result["execution_ready"] is False
+
+
+def test_ibkr_negative_price_sentinels_are_not_quotes():
+    ticker = SimpleNamespace(bid=-1, ask=-1, last=float("nan"))
+    assert local._tick_has_data(ticker) is False
+    assert local._positive_market_value(-1) is None
+    assert local._positive_market_value(float("nan")) is None
+    assert local._positive_market_value(0) is None
+    assert local._positive_market_value(12.5) == 12.5
 
 
 def test_historical_bars_select_tier_too(monkeypatch: pytest.MonkeyPatch) -> None:

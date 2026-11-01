@@ -99,7 +99,8 @@ class RuntimeIpcTests(unittest.TestCase):
         process = Mock()
         intent = SimpleNamespace(
             broker="IBKR", environment="paper", instrument_id="AAPL", side="BUY",
-            integer_qty=2, order_type="market", time_in_force="DAY", account_ref="DU-TEST",
+            integer_qty=2, order_type="market", time_in_force="DAY", limit_price=None,
+            account_ref="DU-TEST",
         )
         contract = {
             "con_id": 265598, "symbol": "AAPL", "security_type": "STK",
@@ -117,6 +118,7 @@ class RuntimeIpcTests(unittest.TestCase):
             broker_order_id=73,
             contract=contract,
             order={"action": "BUY", "quantity": 2, "order_type": "MKT", "time_in_force": "DAY",
+                   "limit_price": None,
                    "account_ref": "DU-TEST", "client_order_id": "client-1", "outside_rth": False,
                    "transmit": True},
         )
@@ -126,6 +128,29 @@ class RuntimeIpcTests(unittest.TestCase):
             transport(BrokerOrderCommand(12, "AAPL", "BUY", 3), intent_id="intent-1",
                       broker_order_id=74, attempt_id="attempt-2", client_order_id="client-2")
         process.place_order.assert_not_called()
+
+    def test_transport_preserves_exact_limit_price(self) -> None:
+        process = Mock()
+        intent = SimpleNamespace(
+            broker="IBKR", environment="paper", instrument_id="AAPL", side="BUY",
+            integer_qty=1, order_type="limit", time_in_force="DAY", limit_price="400.00",
+            account_ref="DU-TEST",
+        )
+        contract = {
+            "con_id": 265598, "symbol": "AAPL", "security_type": "STK",
+            "exchange": "SMART", "primary_exchange": "NASDAQ", "currency": "USD",
+        }
+        transport = IbkrSubprocessPaperTransport(
+            process=process, intent_loader=lambda _intent_id: intent,
+            contract_loader=lambda _instrument: contract,
+        )
+        from src.bt_runtime.brokers.proxy import BrokerOrderCommand
+
+        transport(BrokerOrderCommand(11, "AAPL", "BUY", 1, order_type="limit", limit_price="400.00"), intent_id="intent-limit",
+                  broker_order_id=74, attempt_id="attempt-limit", client_order_id="client-limit")
+        order = process.place_order.call_args.kwargs["order"]
+        self.assertEqual(order["order_type"], "LMT")
+        self.assertEqual(order["limit_price"], "400.00")
 
     def test_contract_mapping_must_match_frozen_instrument_before_child_call(self) -> None:
         process = Mock()

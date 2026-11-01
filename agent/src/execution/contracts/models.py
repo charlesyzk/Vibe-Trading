@@ -9,10 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
@@ -135,8 +135,8 @@ class ExecutionPolicy(StrictModel):
             raise ValueError("V1 decisions occur when a completed bar becomes available")
         if self.dispatch != "next_regular_session":
             raise ValueError("V1 orders dispatch in the next regular session")
-        if self.order_type != "market" or self.time_in_force != "DAY":
-            raise ValueError("V1 supports Market/DAY orders only")
+        if self.order_type not in {"market", "limit"} or self.time_in_force != "DAY":
+            raise ValueError("V1 supports Market/DAY and Limit/DAY orders only")
         if self.outside_rth:
             raise ValueError("V1 orders cannot execute outside regular hours")
         return self
@@ -205,6 +205,7 @@ class OrderIntent(StrictModel):
     integer_qty: Annotated[int, Field(gt=0)]
     order_type: str
     time_in_force: str
+    limit_price: Decimal | None = None
     reference_price: Annotated[Decimal, Field(gt=Decimal("0"))]
     eligible_at: datetime
     expires_at: datetime
@@ -228,8 +229,13 @@ class OrderIntent(StrictModel):
     def valid_window(self) -> "OrderIntent":
         if self.expires_at <= self.eligible_at:
             raise ValueError("expires_at must be after eligible_at")
-        if self.order_type != "market" or self.time_in_force != "DAY":
-            raise ValueError("V1 supports Market/DAY intents only")
+        if self.order_type not in {"market", "limit"} or self.time_in_force != "DAY":
+            raise ValueError("V1 supports Market/DAY and Limit/DAY intents only")
+        if self.order_type == "limit":
+            if self.limit_price is None or not self.limit_price.is_finite() or self.limit_price <= 0:
+                raise ValueError("Limit/DAY intents require a finite positive limit_price")
+        elif self.limit_price is not None:
+            raise ValueError("Market/DAY intents cannot specify limit_price")
         return self
 
 
@@ -331,6 +337,7 @@ class RiskGrant(StrictModel):
     valid_until: datetime
     quote_max_age_seconds: Annotated[int, Field(gt=0)]
     account_max_age_seconds: Annotated[int, Field(gt=0)]
+    funds_check: Literal["account_cash", "broker_paper_limit"] = "account_cash"
     halt_action: str
     liquidation_policy: str
     granted_at: datetime
@@ -353,8 +360,8 @@ class RiskGrant(StrictModel):
     @field_validator("allowed_order_types")
     @classmethod
     def require_order_types(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if not value or any(item != "market" for item in value):
-            raise ValueError("V1 grants support Market orders only")
+        if not value or any(item not in {"market", "limit"} for item in value):
+            raise ValueError("V1 grants support Market and Limit orders only")
         if len(set(value)) != len(value):
             raise ValueError("allowed_order_types must be unique")
         return value
@@ -387,4 +394,21 @@ class RiskGrant(StrictModel):
             raise ValueError("V1 halt action is pause_and_cancel_owned")
         if self.liquidation_policy != "none":
             raise ValueError("V1 does not authorize automatic liquidation")
+        if self.funds_check == "broker_paper_limit":
+            if (
+                self.environment is not Environment.PAPER
+                or self.broker != "IBKR"
+                or re.fullmatch(r"DU[A-Z0-9]+", self.account_ref) is None
+                or self.allowed_instruments != ("AAPL",)
+                or self.allowed_order_types != ("limit",)
+                or self.max_order_notional != Decimal("400")
+                or self.max_gross_exposure != Decimal("400")
+                or self.strategy_budget != Decimal("400")
+                or self.max_daily_loss != Decimal("400")
+                or self.max_orders_per_session != 1
+                or self.quote_max_age_seconds > 10
+                or self.account_max_age_seconds > 10
+                or self.valid_until - self.valid_from > timedelta(hours=8)
+            ):
+                raise ValueError("broker-enforced funds checks are restricted to the exact one-shot AAPL PAPER envelope")
         return self

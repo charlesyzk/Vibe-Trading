@@ -6,6 +6,7 @@
     "paperLastErrorCode": "Letzter Runtime-Fehlercode",
     "paperMissingRequirementsTitle": "Was für die PAPER-Bereitschaft noch benötigt wird",
     "paperRequirement": {
+      "ibkr_runtime_factory": "Eine PAPER-only IBKR-Laufzeit, die mit dem gemeinsamen Gateway-Konto verbunden ist.",
       "strategy_session_builder": "Ein Sitzungsersteller, der die genehmigte, unveränderliche Strategieversion lädt.",
       "attributable_control_authorizer": "Eine Betreiberfreigabe, die an einen ausdrücklichen PAPER-Auftrag gebunden ist.",
       "account_reconciliation_facts": "Brokerkonto-Identität, Positionen, offene Aufträge und Abstimmungsnachweise.",

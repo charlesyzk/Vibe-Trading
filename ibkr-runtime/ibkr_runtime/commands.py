@@ -52,6 +52,8 @@ def execute(owner: IbapiClientOwner, command: str, payload: dict[str, Any]) -> d
     order.action = order_data["action"]
     order.totalQuantity = order_data["quantity"]
     order.orderType = order_data["order_type"]
+    if order_data["order_type"] == "LMT":
+        order.lmtPrice = float(order_data["limit_price"])
     order.tif = order_data["time_in_force"]
     order.account = order_data["account_ref"]
     order.orderRef = order_data["client_order_id"]

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -225,11 +226,12 @@ class SQLiteIbkrSnapshotStore:
                 or reconciliation_result.get("facts_sha256") != facts_sha256
             ):
                 raise ReconciliationSnapshotError("reconciliation proof does not match the captured snapshot facts")
-        summary_tags = {
-            row["tag"] for row in facts["account_summary"] if row["currency"] == "USD"
-        }
-        if not self.REQUIRED_ACCOUNT_TAGS.issubset(summary_tags):
-            raise ReconciliationSnapshotError("required USD account summary tags are missing")
+        summary_currencies = {row["currency"] for row in facts["account_summary"]}
+        summary_tags = {row["tag"] for row in facts["account_summary"]}
+        if len(summary_currencies) != 1 or not self.REQUIRED_ACCOUNT_TAGS.issubset(summary_tags):
+            raise ReconciliationSnapshotError(
+                "required account summary tags must be present in one consistent currency"
+            )
         return {
             "snapshot_id": snapshot_id,
             "account_ref": run[0],
@@ -322,7 +324,11 @@ class SQLiteIbkrSnapshotStore:
             return "", None
         tag = payload.get("tag")
         currency = payload.get("currency")
-        if tag not in self.REQUIRED_ACCOUNT_TAGS or currency != "USD":
+        if (
+            tag not in self.REQUIRED_ACCOUNT_TAGS
+            or not isinstance(currency, str)
+            or re.fullmatch(r"[A-Z]{3}", currency) is None
+        ):
             raise ReconciliationSnapshotError("unsupported account summary tag or currency")
         value = self._decimal(payload.get("value"), "account summary value")
         if tag == "NetLiquidation" and value <= 0:
@@ -375,6 +381,7 @@ class SQLiteIbkrSnapshotStore:
             "action": self._required_text(payload.get("action"), "open order action"),
             "quantity": str(quantity),
             "order_type": self._required_text(payload.get("order_type"), "open order type"),
+            "limit_price": payload.get("limit_price"),
             "time_in_force": self._required_text(payload.get("time_in_force"), "open order TIF"),
             "outside_rth": payload.get("outside_rth"),
             "status": self._required_text(payload.get("status"), "open order status"),
@@ -382,6 +389,16 @@ class SQLiteIbkrSnapshotStore:
         }
         if normalized["action"] not in {"BUY", "SELL"}:
             raise ReconciliationSnapshotError("open order action is unsupported")
+        if normalized["order_type"] == "LMT":
+            limit_price = self._decimal(normalized["limit_price"], "open order limit price")
+            if limit_price <= 0:
+                raise ReconciliationSnapshotError("open order limit price must be positive")
+            normalized["limit_price"] = str(limit_price)
+        elif normalized["order_type"] == "MKT":
+            if normalized["limit_price"] is not None:
+                raise ReconciliationSnapshotError("MKT open order cannot include a limit price")
+        else:
+            raise ReconciliationSnapshotError("open order type is unsupported")
         if type(normalized["outside_rth"]) is not bool:
             raise ReconciliationSnapshotError("open order outsideRth flag is malformed")
         return f"{account_ref}:{order_id}", normalized
@@ -524,6 +541,35 @@ class IbkrRecoveryReconciler:
         self.allocator.confirm_reconciled(expected_order_id=candidate)
         return {**snapshot, "reconciled": True, "reconciliation_result": result}
 
+    def reconcile_risk_snapshot(self, snapshot_id: int) -> dict[str, Any]:
+        """Prove a fresh account snapshot without changing the order-id gate.
+
+        Runtime risk refreshes happen after startup, when the allocator is
+        already open and there is no new ``nextValidId`` candidate to confirm.
+        They still require exact broker/local open-order and position/fill
+        equality; this method records that narrower proof and leaves allocator
+        state untouched.
+        """
+        snapshot = self.store.complete_snapshot(snapshot_id)
+        if snapshot["account_ref"] != self.account_ref or snapshot["environment"] != "paper":
+            raise ReconciliationSnapshotError("risk snapshot scope differs from configured PAPER account")
+        if snapshot["reconciled"]:
+            raise ReconciliationSnapshotError("risk refresh requires a newly captured unreconciled snapshot")
+        order_result = self._reconcile_open_orders(snapshot)
+        position_result = self._reconcile_positions(snapshot)
+        result = {
+            "snapshot_id": snapshot_id,
+            "account_ref": self.account_ref,
+            "environment": "paper",
+            "facts_sha256": snapshot["facts_sha256"],
+            "open_order_count": order_result["count"],
+            "position_count": position_result["count"],
+            "checks": ["scope", "open_orders", "positions"],
+            "purpose": "risk_refresh",
+        }
+        self.store.mark_reconciled(snapshot_id, result)
+        return self.store.complete_snapshot(snapshot_id)
+
     def verify_reconciled_snapshot_is_current(self, snapshot: dict[str, Any]) -> None:
         """Recheck durable orders and fills after callback delivery is quiesced."""
         if (
@@ -563,13 +609,18 @@ class IbkrRecoveryReconciler:
                 or intent.environment is not Environment.PAPER
                 or intent.integer_qty != binding.requested_qty
                 or intent.side != binding.side
-                or intent.order_type != "market"
+                or intent.order_type not in {"market", "limit"}
                 or intent.time_in_force != "DAY"
                 or order["security_type"] != "STK"
                 or order["currency"] != "USD"
                 or order["exchange"] != "SMART"
                 or order["time_in_force"] != "DAY"
-                or order["order_type"] != "MKT"
+                or order["order_type"] != ("LMT" if intent.order_type == "limit" else "MKT")
+                or (
+                    intent.order_type == "limit"
+                    and Decimal(order["limit_price"]) != intent.limit_price
+                )
+                or (intent.order_type == "market" and order["limit_price"] is not None)
                 or order["outside_rth"] is not False
                 or local.state not in {
                     LocalOrderState.SEND_STARTED, LocalOrderState.UNKNOWN,

@@ -12,6 +12,7 @@ import math
 from queue import Queue
 from threading import Event, Lock, Thread
 from typing import Callable
+import uuid
 
 from ibapi.client import EClient
 from ibapi.wrapper import EWrapper
@@ -55,7 +56,13 @@ class IbapiClientOwner:
             raise TypeError("client_factory and thread_factory must be callable")
         self.events: Queue[CallbackEvent] = Queue(maxsize=queue_capacity)
         self.overflowed = Event()
-        self.spool = SQLiteCallbackSpool(spool_path, max_event_bytes=max_event_bytes)
+        # The callback spool survives runtime restarts. Scope content hashes
+        # to this SDK process epoch so repeated handshake callbacks are
+        # delivered to the new host pump.
+        self.runtime_epoch_id = uuid.uuid4().hex
+        self.spool = SQLiteCallbackSpool(
+            spool_path, max_event_bytes=max_event_bytes, epoch_id=self.runtime_epoch_id,
+        )
         self.adapter = IbapiCallbackAdapter(
             self.events, self.overflowed, durable_sink=self.spool.append
         )

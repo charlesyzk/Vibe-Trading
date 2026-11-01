@@ -100,6 +100,8 @@ class OneShotLedgerIntentResolver:
             mismatches.append("order_type")
         if intent.time_in_force != command.time_in_force:
             mismatches.append("time_in_force")
+        if intent.limit_price != command.limit_price:
+            mismatches.append("limit_price")
         if mismatches:
             raise PortOrderRejected("native order differs from armed intent: " + ",".join(mismatches))
         return intent_id
@@ -342,5 +344,7 @@ class BacktraderDispatchPort(BrokerPort):
             mismatches.append("order_type")
         if intent.time_in_force != command.time_in_force:
             mismatches.append("time_in_force")
+        if intent.limit_price != command.limit_price:
+            mismatches.append("limit_price")
         if mismatches:
             raise ValueError("native order differs from authorized intent: " + ",".join(mismatches))

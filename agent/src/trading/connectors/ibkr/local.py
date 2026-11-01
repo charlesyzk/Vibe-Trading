@@ -12,7 +12,7 @@ import socket
 import itertools
 import threading
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterable, Mapping
@@ -44,6 +44,7 @@ MARKET_DATA_TYPES = {
     3: "delayed",
     4: "delayed-frozen",
 }
+_MARKET_DATA_SUBSCRIPTION_CODES = frozenset({354, 10089, 10090, 10168})
 
 DEFAULT_MARKET_DATA_TYPE = 3
 
@@ -346,9 +347,35 @@ def _tick_has_data(ticker: Any) -> bool:
 
     for field in ("bid", "ask", "last"):
         value = _obj_get(ticker, field)
-        if value is not None and not (isinstance(value, float) and math.isnan(value)):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(numeric) and numeric > 0:
             return True
     return False
+
+
+def _positive_market_value(value: Any) -> float | None:
+    """Normalize IBKR NaN/negative/non-numeric price sentinels to null."""
+    import math
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return numeric if math.isfinite(numeric) and numeric > 0 else None
+
+
+def _nonnegative_market_value(value: Any) -> float | None:
+    """Normalize invalid volume/size sentinels while preserving a real zero."""
+    import math
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return numeric if math.isfinite(numeric) and numeric >= 0 else None
 
 
 def _apply_market_data_type(ib: Any, config: IBKRLocalConfig) -> str | None:
@@ -435,10 +462,45 @@ def get_quote(
         _assert_profile(cfg, accounts)
         contract = _make_contract(symbol, exchange=exchange, currency=currency, sec_type=sec_type)
         _qualify_contract(ib, contract)
-        tier_unapplied = _apply_market_data_type(ib, cfg)
-        ticker = ib.reqMktData(contract, "", True, False)
-        received = _wait_for_tick(ib, ticker)
+        market_data_errors: list[dict[str, Any]] = []
+
+        def capture_market_data_error(*args: Any) -> None:
+            if len(args) < 3 or type(args[1]) is not int or args[1] not in _MARKET_DATA_SUBSCRIPTION_CODES:
+                return
+            message = str(args[2] or "").strip()
+            entry = {"code": args[1], "message": message[:500]}
+            if entry not in market_data_errors:
+                market_data_errors.append(entry)
+
+        error_event = _obj_get(ib, "errorEvent")
+        subscribed_error_handler = False
+        if error_event is not None:
+            try:
+                ib.errorEvent += capture_market_data_error
+                subscribed_error_handler = True
+            except (AttributeError, TypeError):
+                pass
+        try:
+            tier_unapplied = _apply_market_data_type(ib, cfg)
+            ticker = ib.reqMktData(contract, "", True, False)
+            received = _wait_for_tick(ib, ticker)
+        finally:
+            if subscribed_error_handler:
+                try:
+                    ib.errorEvent -= capture_market_data_error
+                except (AttributeError, TypeError):
+                    pass
         tier = MARKET_DATA_TYPES.get(cfg.market_data_type, str(cfg.market_data_type))
+        actual_tier_code = _obj_get(ticker, "marketDataType")
+        if type(actual_tier_code) is not int or actual_tier_code not in MARKET_DATA_TYPES:
+            actual_tier_code = None
+        bid = _positive_market_value(_obj_get(ticker, "bid"))
+        ask = _positive_market_value(_obj_get(ticker, "ask"))
+        last = _positive_market_value(_obj_get(ticker, "last"))
+        close = _positive_market_value(_obj_get(ticker, "close"))
+        top_of_book_available = bid is not None and ask is not None and ask >= bid
+        actual_tier = MARKET_DATA_TYPES[actual_tier_code] if actual_tier_code is not None else None
+        execution_ready = received and actual_tier_code == 1 and top_of_book_available
         result = {
             "status": "ok" if received else "no_data",
             "symbol": symbol.upper(),
@@ -446,31 +508,48 @@ def get_quote(
             "currency": currency,
             "market_data_type_requested": tier,
             "market_data_type_applied": None if tier_unapplied else tier,
+            "market_data_type_actual": actual_tier,
+            "market_data_type_actual_code": actual_tier_code,
+            "quote_quality": "two_sided" if top_of_book_available else ("last_only" if last or close else "empty"),
+            "execution_ready": execution_ready,
+            "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "qualified_contract": {
+                "symbol": str(_obj_get(contract, "symbol", "")).upper(),
+                "sec_type": str(_obj_get(contract, "secType", "")).upper(),
+                "exchange": str(_obj_get(contract, "exchange", "")),
+                "primary_exchange": str(_obj_get(contract, "primaryExchange", "")),
+                "currency": str(_obj_get(contract, "currency", "")).upper(),
+                "con_id": int(_obj_get(contract, "conId", 0) or 0),
+            },
             "quote": {
-                "bid": _obj_get(ticker, "bid"),
-                "ask": _obj_get(ticker, "ask"),
-                "last": _obj_get(ticker, "last"),
-                "close": _obj_get(ticker, "close"),
-                "volume": _obj_get(ticker, "volume"),
+                "bid": bid,
+                "ask": ask,
+                "last": last,
+                "close": close,
+                "volume": _nonnegative_market_value(_obj_get(ticker, "volume")),
                 "time": str(_obj_get(ticker, "time", "")),
             },
         }
         if tier_unapplied:
             result["warning"] = _unapplied_tier_warning(tier, tier_unapplied)
+        if market_data_errors:
+            result["market_data_errors"] = market_data_errors
         if not received:
-            result["error"] = (
-                f"No market data arrived for {symbol.upper()}. "
-                + (
-                    f"The '{tier}' tier was not applied, so TWS most likely used its "
-                    "live tier, which needs a market-data subscription for this "
-                    "instrument. "
-                    if tier_unapplied
-                    else f"The '{tier}' tier was applied, so a missing market-data "
-                    "subscription is an unlikely cause. "
+            if market_data_errors:
+                codes = ", ".join(str(row["code"]) for row in market_data_errors)
+                result["error"] = f"IBKR reports unavailable market-data subscription (code {codes})."
+            else:
+                result["error"] = (
+                    f"No market data arrived for {symbol.upper()}. "
+                    + (
+                        f"The '{tier}' tier was not applied, so TWS may have used its "
+                        "live tier, which can require a market-data subscription. "
+                        if tier_unapplied
+                        else f"The '{tier}' tier was applied, but no valid quote tick arrived. "
+                    )
+                    + "Other causes include a closed market or unavailable market-data subscription/entitlement, "
+                    "or an invalid symbol/exchange pair."
                 )
-                + "Other causes: the market is closed (try market_data_type 2 or 4 "
-                "for frozen last-known prices), or the symbol/exchange pair is wrong."
-            )
         return result
     finally:
         _pool.release()

@@ -1,3 +1,270 @@
+# B237 Electron 实际网络请求凭证路由验证（2026-11-01）
+
+- 新增 `desktop/electron/scripts/smoke-operator-auth.cjs`：在隐藏的真实 Electron BrowserWindow 和临时本机 HTTP 服务之间发起 fetch，经过 Electron `webRequest.onBeforeSendHeaders` 和与主进程相同的授权头处理函数；PAPER 路径到达服务时保留具名 operator token，settings 路径使用内部 key。`npm run smoke:operator-auth` 在本机 Electron 43.1.1 通过；仅使用测试凭证和临时服务，不连接 Gateway、不下单。
+- 此证据覆盖 Electron 网络钩子，不代表打包后的桌面端完整 PAPER 下单验收；真实券商回报及成交后持仓对账仍待授权窗口。
+
+# B236 桌面版具名 PAPER 操作员凭证入口（2026-11-01）
+
+- 发现 Electron 隐藏本地 API 访问设置，并将每个请求的 Authorization 强制覆盖为内部共享密钥，导致桌面版无法把具名 operator token 传到 PAPER 控制接口。现显示设置入口；Electron 只在本机 backend origin 的 PAPER 接口保留明确的 `Bearer vtpo_…` 请求头，其有效性和 action grant 仍由后端校验；设置和 SSE ticket 等其他接口沿用原共享密钥，重复大小写的 Authorization 被规范化。
+- Electron TypeScript 构建及授权头路由测试通过，Settings 相关 Vitest **12 passed**，前端构建通过。现有已安装桌面包需要重新构建或更新，尚未运行打包后的 Electron 端到端 PAPER 验收；真实 PAPER 订单仍待授权窗口。
+
+# B235 真实 Gateway 启动、对账、停止后历史读取（2026-11-01）
+
+- 停止后历史读取修复部署到本地 API 后，用已选 Python 版本完成真实 Gateway start→activity→stop→activity：启动 READY/PAUSED、gate closed；运行时 positions 来源为 `ibkr_reconciled_snapshot`，订单 0；停止后 STOPPED、owner lease released、gate closed；停止后 activity 可读取 0 条订单并将 positions 标为 unknown。未 activate、place 或 cancel。
+- 独立 fixture 覆盖停止后已有订单的持久读取和其他 PAPER scope 的隔离；实际账户目前没有订单，真实 ACK/fill 和成交后持仓对账仍须在授权窗口验证。
+
+# B232 单笔窗口前授权和账本核验（2026-11-01）
+
+- 只读检查已配置 operator token，在 2026-11-02 15:00 UTC（窗口内）仍有效，且对配置的 PAPER scope 的 `start`、`activate`、`stop` grant 均有效。三个 grant 到期时间均为 2026-11-02 21:00 UTC；窗口结束后不能依赖这些 grant 做操作。
+- 只读检查 `order_intent`、`order_reservation`、`broker_order_binding`、`order_outbox` 四表均为 0 行。此检查没有打开 dispatch gate 或发单；是否收到券商回报、成交和最终持仓仍须窗口内实际验证。
+
+# B231 用户登录后真实 PAPER 行情到新版本启动验收（2026-11-01）
+
+- 用户登录 Gateway 后，应用通过 `ibkr-paper-local` 拉取 AAPL 2026-10-01 至 2026-10-30 共 22 根日线，获得服务器签发的 PAPER 导入凭证。使用实际下载示例和真实隔离 worker 执行 Python upload 回测，run ID `btpy_20261101_041050_05cbb641e1cb`，Backtrader 独立回放 verified，1 笔未成交订单、0 fills；这是一份离线回测。
+- 新冻结版本 `55903e45743fe32791f1bd8513274c4315e238a7d1f742e0b1a34064f180feea` 通过候选兼容性并经具名 operator 实际选择为 PAPER 版本；报告 SHA-256 `cb997c0e3ad81eb4ac577b27a6fc37cbc5267ee2cba9d2b75461d972f091506a`，selection 返回 `order_submission_performed=false`。应用重新装配后同版本报告 attestation verified。
+- 使用所选新版本实际执行 PAPER start→activity→stop：启动 READY/PAUSED、gate closed，Gateway 已对账快照显示 0 positions、0 orders、恢复队列均为 0；停止后 STOPPED、gate closed、lease released。未 activate、place 或 cancel。单笔窗口仍未开放；真实下单回报和持仓对账尚未验收。
+
+# B230 联调示例通过真实隔离 worker 到候选的离线验收（2026-10-31）
+
+- 执行现有 IBKR Python upload API 集成用例时，使用 `frontend/public/templates/paper_aapl_one_shot.py` 的实际源码，将其评估日期替换为用例日期，并保留本机已配置的镜像及真实 `PythonSandbox`；用例中的 IBKR 历史行情仍是 fixture。真实隔离 Docker worker、Backtrader 运行、报告和 PAPER 候选校验通过，输出恰好一笔未成交 AAPL BUY 1 LMT $400。使用临时运行目录，没有连接 Gateway 或提交订单。
+- Execution 页面提供该示例下载、候选阻止原因和评估日过期提示；HTML 手册补充评估日和 worker 配置说明。真实券商 ACK/reject、fill 和持仓对账仍待授权窗口内执行。
+
+# B229 修复 PAPER 上传回测到候选策略之间的实质断点（2026-10-31）
+
+- Python upload 预览 token 原来把默认资金字段的 int/float 表示差异纳入确认哈希，导致同一组预览参数提交时返回 409。现将数量和金额/费率字段规范到稳定数值类型，确保预览与确认一致；端到端测试实际完成了带预览 token 的 Backtrader run。
+- 新上传策略 spec 原来直接写入外部日历名 `XNYS`，但纸面组合的冻结策略契约校验使用 runtime key `us_equity_rth`，使得正确的 AAPL 完成日线策略也被错误阻断。现按 runtime 约定生成 spec；报告仍保留经 pinned XNYS 校验的 manifest、日程哈希与行情证据。
+- IBKR PAPER 拉取现在签发一次性 token，绑定确切 CSV、交易日程、PAPER profile、qualified USD/STK conId 和 retrieval 时间。预览校验 token 后才写入保留的 host-observed attestation，单次消费并绑定到报告/冻结数据；调用者仅伪造 provider 文本不能成为 PAPER 候选。普通无证明 CSV 仍可离线回测，但不符合当前 PAPER candidate policy。
+- 验收：upload→Backtrader→candidate **16 passed、28 deselected**；候选/部署/API/one-shot runner **47 passed、2 warnings**；Execution UI **18 passed**；TypeScript/Vite production build 通过。命令和边界见 `ACCEPTANCE.md` B229。
+- 新增独立中文 HTML 使用手册，串联策略创建、IBKR PAPER 行情拉取、上传预览、冻结回测、候选选择、Gateway 启动/单笔动作、回报/持仓核对和常见问题：`PAPER_USER_GUIDE.html`。本轮没有提交 Gateway 订单；真实 ACK/reject、fill 与 fresh position reconciliation 仍需操作员在授权窗口验证。LIVE 保持禁用。
+
+# B228 冻结候选策略可选择为受限 PAPER deployment（2026-10-31）
+
+- 将候选判定从“已经 pin 的唯一版本”改为检查冻结策略和其成功 Backtrader 报告是否共同符合本次固定订单：Python upload、AAPL 完整 RTH 日线、LMT/DAY、long-only 单股，报告声明 IBKR PAPER Gateway、单日 evaluation，且恰好一笔未成交 AAPL BUY 1 LMT `$400`。`sma-cross-10-30` 因 MARKET、target-fraction、模板来源及报告订单形状不匹配继续 blocked。
+- 新增 `POST /api/execution/paper/strategy-candidates/select` 和 Execution 页选择按钮。选择要求具名可归属操作员、runtime STOPPED、one-shot 账本为空、integration action 未运行；它从已验证 report 生成 deployment-local attestation，原子更新只含同一固定授权范围的本地版本绑定，重建 app composition，并写 operator/version/report SHA-256 审计记录。失败时恢复旧配置和旧 composition。该路由不连接 Gateway、不打开派单闸门、不下单；启动/单笔执行仍是独立显式操作并受原 UTC window 限制。
+- composition 的 signal session 改由精确版本回测证明的 `evaluation_end` 决定，避免假定任意 Python 版本都内嵌 `signal_session_date`；专用 PAPER 回测刷新也不再要求旧日期参数。
+- API 重启后真实调用 authenticated candidate selection（选择当前已部署版本，验证持久化/重建流程）：返回 exact version 与 report digest，`order_submission_performed=false`；重读状态仍 READY composition、`STOPPED`、gate closed、无 lease；订单账本 4 表仍为空。此操作没有连接账户。当前本机目录只有原 integration-test 版本兼容，因此尚未用另一个真实新建版本做端到端选择。
+- PAPER 候选/部署/路由后端定向组 **45 passed、2 warnings**；Execution UI **18 passed**，TypeScript/Vite production build 通过；`git diff --check` 通过。合伙人自建兼容策略的选择，以及 broker ACK/fill/position reconciliation 留待其在有效窗口执行；LIVE 仍关闭。详见 `ACCEPTANCE.md` B228。
+
+# B227 API 重启后的 PAPER 窗口与副作用复核（2026-10-31）
+
+- 当前 API 进程健康，认证 PAPER status 显示 `STOPPED`、派单闸门关闭、owner lease 未持有、composition ready；固定版本仍为已证明的 AAPL 单笔 Python 版本。联调状态显示配置已启用，但窗口尚未开放；允许窗口为 `2026-11-02 14:30–21:00 UTC`，订单为 AAPL BUY 1、LMT `$400.00`、DAY、RTH-only、上限 `$400`，同版本 Backtrader attestation 仍 verified。
+- PAPER 执行 SQLite 的 `order_intent`、`order_reservation`、`broker_order_binding` 与 `order_outbox` 均为 0 行。Stopped 状态下活动 API 不提供 activity snapshot（返回 409）；只读数据库计数确认没有遗留订单或 reservation。没有连接、启动、激活、下单或撤单。
+- 认证候选接口仍返回两版：固定 one-shot 版本兼容；`sma-cross-10-30` 因 MARKET、target-fraction、NL 模板与固定 Python LMT composition 不匹配而不可部署。应用没有候选切换/通用 deployment mutation；真实 broker ACK/fill/position reconciliation 仍需窗口内由用户显式触发。LIVE 保持禁用。
+
+# B226 给伙伴展示已回测策略及当前 PAPER 部署兼容性（2026-10-31）
+
+- 新增 authenticated `GET /api/execution/paper/strategy-candidates` 与只读候选目录，扫描成功的 Backtrader run、完整性 sidecar、不可变 version store 和 execution replay 状态；只返回成功且 report/version/spec 相符的版本，不暴露账户标识、源码或凭据。目录明确标注当前部署模式及受限订单包络。
+- Execution 页增加“已冻结的回测版本”列表，展示版本 hash、标的、执行订单类型、仓位模式、evaluation 区间、manifest hash 和是否有当前 PAPER composition。API 重启后真实目录读出两版：固定 Python AAPL BUY 1 LMT `$400` 联调版为 `paper_deployable=true`；`sma-cross-10-30` 报告完整性通过、回测 16 orders/16 fills，但策略是 MARKET + target_fraction + natural_language_template，因此不能冒用固定 Python LMT 风控包，显示不可 PAPER 部署及具体原因。
+- 当前目录仍只是部署前的证据/兼容性展示，尚没有通用 version selection/部署 mutation API；固定 PAPER composition 仍 pin one-shot 版本。没有 activate/place/cancel。真实 AAPL PAPER ack/fill/position reconciliation 仍受 2026-11-02 14:30–21:00 UTC 明确窗口约束。
+- 候选服务/API 定向 **44 passed、2 warnings**；Execution UI **17 passed**，`npm run build` 通过；API restart 后 authenticated endpoint 返回与本地 run artifacts 一致的两版候选；目录拒绝符号链接 artifact 路径；`git diff --check` 通过。详见 `ACCEPTANCE.md` B226。
+
+# B225 将 PAPER 启动绑定到同版本且完整性复核通过的 Backtrader 报告（2026-10-31）
+
+- 新增 `paper_backtest_attestation.py`：固定 PAPER composition 装载时，以及 one-shot action 提交前，都要求已冻结版本有精确匹配的成功 Backtrader 报告；核验报告/版本 hash、AAPL instrument、BackBroker engine、manifest hash 和独立 execution replay `verified` 状态。报告写入同目录完整版本 ID 文件名与 SHA-256 sidecar；验证时拒绝符号链接、缺失/篡改 sidecar、版本错配和未验证报告。该本机 sidecar 用于发现意外替换，不是签名或防本机恶意改写机制。
+- Execution 页显示匹配回测验证状态与 evaluation 日期；证据缺失时 one-shot 按钮保持禁用。重连后重新拉取 PAPER Gateway AAPL 历史数据并生成新报告：冻结版本 `cae6cacc…`，evaluation 2026-10-30，manifest hash `bacafd5dcb2ea9434d1cbc6d024d41fcf96143a7ddf54ff433979ab15e5e2280`，Backtrader/BackBroker independent replay `verified`，1 个未成交离线订单、0 fill。Composition 无连接构造 READY；重启 API 后 status 报告 `backtest_attestation=verified`。
+- 实际应用再次完成 PAPER start→fresh reconciled snapshot→stop：READY/PAUSED、gate closed；0 positions、0 active orders、四个 recovery queue 均为 0；stop 后 lease 已释放。没有 activate、place 或 cancel。
+- 定向后端组 **49 passed、2 warnings**；Execution UI **17 passed**，Vite/TypeScript production build 通过；`py_compile`、`git diff --check` 通过。真实 PAPER ack/fill 与持仓复核仍待 2026-11-02 14:30–21:00 UTC。通用 Python-upload 版本选择/部署仍未实现；该变更只确保现有固定 one-shot 版本先有同版本 Backtrader 证据。详见 `ACCEPTANCE.md` B225。
+
+# B224 Gateway 重启后重连并重新获取 AAPL 历史数据（2026-10-31）
+
+- 用户重启 Gateway 后，API health 为 healthy；受鉴权 PAPER `start` 将 runtime 带到 READY/PAUSED，dispatch gate 关闭，`activity` 使用 `ibkr_reconciled_snapshot`，账户持仓 0、活动订单 0。随后 `stop` 成功，phase=STOPPED，owner lease 释放。首次快照结果输出脚本误把 `positions` 当数组处理；按实际响应结构重读后确认无异常，期间没有 activate 或订单操作。
+- 通过 `run_paper_integration_test_backtest(duration="1 M")` 从 PAPER Gateway 拉取 AAPL XNYS 日线 TRADES；数据范围 2026-10-01 至 2026-10-30，warmup 至 10-29，evaluation 为 10-30。报告版本与配置固定版本相同，Backtrader 1.9.78.123 / BackBroker，manifest hash `fbbbea3ceb51c1e3634de0e6a6cce637f3784f71ef5c10467e81412e448cdc76`，独立重放 `execution_integrity=verified`。报告有 1 个 `OPEN_AT_DATA_END` 模拟订单、0 fills；这是离线 BackBroker 行为，不是 Gateway 订单证据。
+- 回查执行 SQLite 的 `order_intent`、`order_reservation`、`broker_order_binding`、`order_outbox` 均为 0 行。one-shot 真实订单仍只在已配置的 2026-11-02 14:30–21:00 UTC 窗口内由操作员显式触发；没有下单。通用 Python 上传版本仍无 PAPER 候选选择/部署入口，不能把固定联调策略等同于任意策略部署。详见 `ACCEPTANCE.md` B224。
+
+# B223 修复同进程 PAPER 重启失败并验证可重复安全连接（2026-10-31）
+
+- 定位 B222 后重复 start 的 409 根因：共享 `IbkrManagedRiskSnapshotSource` 保留上一轮 runtime；SDK wrapper 成功退出后仍保留历史 PID，旧判断把已关闭进程误认成活动 runtime，拒绝绑定下一轮。现在只有账户 lease 已释放、SDK 进程有明确 `_process_closed` 证明、callback worker/health monitor 停止且 callback 和 inbox 队列排空，才允许 snapshot source 绑定下一 runtime；风险 provider 同时按规范化 SQLite 路径校验 ledger 身份，支持同一部署安全重启。
+- 修复固定 one-shot composition 重复使用已停止的 Backtrader completed-bar feed：session builder 可调用受信 feed factory，每个 deployment session 都获得新的 queue/feed；合同映射仍在每次构造时验证。管理器将构造失败仅以安全异常类型/固定诊断码保留到状态端点，便于区分构造失败而不暴露账户或传输详情。
+- 验收：风险 snapshot rebind、one-shot risk facts、Python PAPER composition factory、PAPER manager 相关回归 **45 passed、1 warning**；`py_compile`、`git diff --check` 通过。应用重新加载后在同一 API 进程完成两轮 `/start` → fresh IBKR reconciled snapshot → `/stop`，两轮均 READY/PAUSED、派单闸门关闭，0 positions、0 open orders，安全停止且 owner lease 释放。订单相关 ledger 表仍为 0；未调用 one-shot 下单入口。
+- 策略/回测交接审计：当前联调版本 `cae6cacc…` 在本机 global `StrategyVersionStore` 有 Python-upload immutable record，匹配 Backtrader 1.9.78.123 / BackBroker 报告 `20261031T144417Z-cae6cacc8f35.json`，独立 execution integrity 为 verified，数据 manifest hash 存在，1 笔模拟订单为 `OPEN_AT_DATA_END`（没有 fill）。普通 Python-upload preview/confirm API 会生成 frozen version 并运行真实 Backtrader，但 PAPER composition 从固定 `paper-integration-test.json` 读取该单笔版本 ID；当前没有把任意已回测 run/version 列为候选并切换到对应受限部署的 API/UI。由此确认“策略创建/冻结/回测”与“单笔 PAPER 联调”各自存在，通用用户策略的部署选择接缝仍缺。
+- 当前状态：health healthy，composition ready，runtime STOPPED；固定 AAPL BUY 1 股 LMT $400、DAY、RTH-only 配置已启用但有效窗口仍是 `2026-11-02 14:30–21:00 UTC`。真实订单 callback/fill/交易后持仓对账仍待该窗口。通用策略 PAPER 交接还需按该策略的 execution policy、份额/预算 grant、contract、实时 risk facts 与 completed-bar source 建立专属 deployment；不能直接把任意回测版本塞进固定 one-shot 配置。Live 保持禁用。
+
+# B222 为合伙人接通受限 PAPER 操作入口并补齐失败清理/下单后对账（2026-10-31）
+
+- Execution 页面现在读取受限 one-shot 配置状态并展示固定 AAPL BUY 1 股、LMT $400、DAY/RTH-only 与 UTC 时间窗；不在时间窗、未启用、无可用 composition 或 runtime 未停止/暂停时，按钮保持禁用。一次性按钮调用 operator-authenticated `/api/execution/paper/integration-test/run`；普通 PAPER activation 控件在此专用 composition 下隐藏，避免用户误启用一般策略。结果卡和现有活动面板展示 callback、成交及 IBKR 对账快照；对应只读 `/api/execution/paper/integration-test/status` 不暴露账户标识。
+- runner 完成单次 frozen signal bar 后先关闭 dispatch gate，再取新鲜账户/开放委托/持仓快照并执行 reconciliation；activity 面板仅展示该 PAUSED runtime 的新鲜 reconciled broker positions，不用 fill 记录猜持仓。risk-refresh snapshot 与 Backtrader hydration proof 分离，新的交易后 position facts 不可拿来重建 Cerebro 状态。
+- 修复部署 factory 的构造失败资源释放：若 runtime 已构造并取得 allocator 文件锁，但策略 session builder/pin validation 抛错，只在确认 SDK child、worker、monitor 和 owner lease 均未启动时释放 allocator。真实 started/leased runtime 不会走该丢弃路径。以前会遗留 process-local 文件锁直到 API 进程退出，造成重试失败。
+- 验收：managed deployment/runtime/manager/routes 与 one-shot runner **76 passed、4 warnings**；Execution 页面 **17 passed**；`npm run build` 成功；后端 py_compile 与 `git diff --check` 通过。改动重载后真实 `/health` healthy、composition ready、缺项 0、PAPER runtime STOPPED/gate closed；one-shot status 返回 enabled=true、window_open=false、固定 $400 上限。未调用真实订单入口；窗口仍为 2026-11-02 14:30–21:00 UTC。
+- 真实 post-order IBKR callback、fill 与新 positions snapshot 尚未发生，故本次没有把端到端订单闭环标为完成；当前 owner identity 是本机用户。伙伴需要各自的 operator token/action grant，使用步骤见 `PAPER_OPERATORS.md`。Live 保持禁用。
+
+# B221 Gateway 重启后的 app-managed PAPER 真实对账通过（2026-10-31）
+
+- 用户手动重启 Gateway 后，主应用已加载固定 one-shot PAPER composition：health healthy、`configured=true`、`composition_ready=true`、`missing_requirements=[]`，绑定冻结版本 `cae6cacc8f35e287beb26026ef2770d233d10af4352205d3eb47f11b8314a5d9`。本地配置当前 `enabled=true`，但实际提交仍受唯一有效时间窗 `2026-11-02 14:30–21:00 UTC` 和显式 operator action 限制。
+- 通过具名 operator token 调用 `POST /api/execution/paper/start` 后，官方 IBKR runtime 成功连接用户重启后的 PAPER Gateway，完成 strict account/positions/open-orders snapshot reconciliation，app 状态为 `READY` / `PAUSED`，dispatch gate closed、lease held。随后 `/api/execution/paper/activity` 返回 `source=ibkr_reconciled_snapshot`、时间 `2026-10-31T15:04:12Z`，0 持仓，恢复队列 `ready_to_reserve/ready_to_send/unresolved_sends/active_orders=0`；`POST /stop` 成功，最终 STOPPED、gate closed、lease released。
+- 最终对 SQLite ledger 做只读核对：`order_intent`、`order_reservation`、`broker_order_binding`、`order_outbox` 均为 0 行。因此这轮没有创建或发送任何券商订单。首次 start 请求返回 409；当时 API 进程仍持有本机 order-ID lock。重启本地 API 释放旧进程文件描述符后再次启动成功；首次失败的更具体根因未确认，不把它归因于 Gateway。
+- `ACCEPTANCE.md` B221 记录本次证据。剩余闭环是等待约定窗口并由 operator 显式调用 `/api/execution/paper/integration-test/run`，然后观察 IBKR ack、成交回报、positions 与后续 reconciliation。当前配置精确为 PAPER AAPL BUY 1 股 LMT `$400.00`、DAY、RTH-only；未确认前不声称订单/成交完成。Gateway 返回的账户摘要仅 HKD、AAPL live 双边行情权限不足；风险路径不伪造 USD 现金或实时 quote，broker paper limit 最终决定购买力。
+
+# B220 为固定 AAPL PAPER 联调单增加真实快照风险事实 provider（2026-10-31）
+
+- 新增 `PaperIntegrationTestRiskFactsProvider`：每次 dispatch 都校验本机 one-shot 配置仍启用且处在唯一 UTC 窗口内，订单参数必须逐项匹配 AAPL BUY 1 LMT $400、DAY/RTH、绑定部署与冻结版本；随后读取新的、完整且已对账的 managed PAPER snapshot，要求必要账户摘要完整且币种一致、快照不超过 10 秒、账户当前空持仓/空挂单。
+- provider 绑定到真实 `IbkrManagedPaperRuntime` 后使用其共享 SQLite 账本；派单事实只会为账本中的当前 intent 创建，排除该 intent 后拒绝其他 active/unresolved intent，并以无界 SQL 历史检查拒绝该冻结版本先前已有的任何订单。HKD 摘要只验证完整性，不转换或冒充 USD 余额；固定限价模式的 USD buying power 仍由 IBKR 接单阶段裁定。
+- 新增精确 scope 的 `SQLiteOrderLedger.has_strategy_version_intent()`，避免只查最近 100 条而遗漏更早的策略订单。provider 相关联回归（provider/config/risk/outbox/dispatch service）**81 passed**；`py_compile` 与 `git diff --check` 通过。重启后 API `/health` 返回 healthy，但 `/api/execution/paper/status` 实测仍 `NOT_CONFIGURED`，缺少 runtime factory、strategy builder、attributable authorizer、account/reconciliation、verified market/contract 与 risk/cost facts；联调配置仍 `enabled=false`。
+- 未完成项：本轮只补了 facts provider 与账本 guard，没有将它注册到 manager/API 的 one-shot action，没有 app composition、专用已冻结 LMT 测试策略及正式事件/行情驱动，也没有真实订单回报、成交及持仓复核。配置窗口为 2026-11-02 14:30–21:00 UTC；窗口到来前不发送。详见 `ACCEPTANCE.md` B220 和 B218–B219。
+
+# B219 为唯一固定 AAPL 限价联调单补充 broker buying-power 风控分支（2026-10-31）
+
+- 新增 `RiskGrant.funds_check=broker_paper_limit` 与 `RiskFacts` 缺失报价/美元现金的显式表示。该分支强校验：IBKR PAPER、精确 DU 账户 scope、AAPL、仅 LMT、单股 $400、单笔 session、每单/策略/总敞口/当日损失上限均精确 $400、授权时段不超过 8 小时，费用 $1、价格 buffer 5%；facts 还必须来自新鲜完整账户快照、零持仓/零策略持仓/零本地预留、零既往测试订单。普通模式仍要求新鲜报价、NetLiquidation 和 available cash。
+- `evaluate_order_risk()` 对该限定订单按 LMT $400 计 $400 名义风险，风险事实还计入配置的 $1 费用储备；账户美元购买力交给 IBKR 下单前接受/拒绝，RiskFacts 不伪造 USD cash、股票 quote 或 FX。Outbox 只把限价作为 Backtrader 的价格锚点，并明确不将它记录成 market quote。
+- 本机 one-shot JSON 的风险节新增固定 `funds_check=broker_paper_limit`，`enabled` 仍为 false，未开放任何 API 或发送路径。回归命令覆盖 risk、outbox、contract、config、Cerebro event bridge、native dispatch 与 dispatch service，**103 passed、5 warnings**。本轮没有 Gateway 写操作。
+- 未完成项：provider、one-shot operator API、app composition 或 UI 尚未接通；真实订单和 broker buying-power/ack/fill/position 对账仍待 2026-11-02 有效窗口。详见 D-127 和 `ACCEPTANCE.md` B219–B220。
+
+# B218 Gateway 重启后复查实时行情权限与 USD 购买力事实（2026-10-31）
+
+- 使用本机只读 PAPER connector（profile=paper、4002、`readonly=true`），只把该次 quote 请求的行情档位覆盖成 live；AAPL SMART/USD/STK `conId=265598` 再次返回 IBKR **10089**、无 bid/ask、`execution_ready=false`。USD/HKD IDEALPRO 也没有双边实时报价。探测没有请求任何委托操作。
+- 同一只读 connector 获取的账户摘要有 24 项，当前 `NetLiquidation`、`TotalCashValue`、`AvailableFunds` 必要字段只报告 HKD，未提供 USD `AvailableFunds` 或 USD `TotalCashValue`。当前账户仍 0 持仓、0 开放委托。不能把 HKD 金额当 USD，也不能假设 IBKR 会接受/成交 USD 订单；真实单笔风险仍需由明确的限价上限和可信账户/订单结果共同约束。
+- 这次重启没有改变此前行情订阅事实。主应用仍 `NOT_CONFIGURED`，one-shot 配置仍禁用；当前不是订单可提交/可验收状态。下一步要完成 one-shot 入口的端到端 composition，并为无实时行情/无 USD 现金事实的账户制定可审计的固定限价风控决策；不得伪造 quote、汇率或购买力。没有 place/cancel。
+
+# B217 用户再次重启后的 PAPER Gateway 只读复连（2026-10-31）
+
+- 用户确认手动重启后，使用锁定的 `ibkr-runtime/.venv/bin/python`、全新隔离 SQLite 和新 client ID 再次连接 PAPER 4002。官方 SDK handshake 成功；账户/持仓/开放委托快照完整且严格对账通过，包含 3 个必要账户摘要值，0 持仓、0 开放委托。运行时保持 PAUSED，派单闸门关闭；随后执行 `stop()`，并独立尝试获取同一 owner-lock 文件确认 lease 已释放。诊断数据库保留在 `~/.vibe-trading/paper-integration-test/runtime-readonly-after-restart-20261031T142110Z-547f008d/paper.sqlite`。
+- 本次没有构造策略 session，没有调用 activate/placeOrder/cancelOrder。主 API `127.0.0.1:8899` 仍报告 `NOT_CONFIGURED`；one-shot AAPL BUY 1 LMT $400 配置仍 `enabled=false`，允许窗口为 2026-11-02 14:30–21:00 UTC。B217 证明用户重启后 Gateway 和账户对账可用，不代表 app 下单链已接通；该时段外仍禁止发送。
+- 诊断脚本的最终展示读取了不存在的 `owner_lease_held` 字段而中断打印；`stop()` 已先返回，随后对同一锁文件执行非阻塞排他锁检查成功，确认没有遗留 owner lease。该打印问题不影响 Gateway 连接或安全停止。
+
+# B216 增加单笔 PAPER 联调配置的严格只读解析器（2026-10-31）
+
+- 新增 `paper_integration_test_config.py`，只读解析本地 `paper-integration-test.json`，拒绝符号链接、非普通文件、过大/非法 JSON、LIVE/非 4002 endpoint、其他合约/标的/数量/订单类型/价格、放宽的金额上限、非 UTC 窗口和偏离已确认有效时段的配置。当前本机文件成功解析，仍为 `enabled=false`；参数是 PAPER AAPL BUY 1 LMT $400.00，当前窗口关闭。解析不会修改文件，也不授予发送权限。
+- 新增配置模型边界与本地文件读取测试。配置/限价联调专项 **40 passed、19 subtests**；`py_compile` 和 `git diff --check` 通过。
+- 这只是执行入口的输入契约；API/manager 尚未消费配置，也尚无 one-shot submit action。应用 PAPER composition 仍为 `NOT_CONFIGURED`，本轮无连接、订单或撤单操作；T24 仍 NOT RUN。
+
+# B215 PAPER Gateway 重启后安全复连；限价订单贯穿离线信任链（2026-10-31）
+
+- 用户再次重启后，用新的隔离目录、官方 `ibapi 10.50.2` venv 原始可执行路径和新 client ID 执行 PAPER 4002 `start_paused()` → 完整账户/持仓/开放委托快照 → `stop()`。连接成功，严格对账通过，关键账户摘要 3 项、币种 HKD，0 positions、0 open orders；状态 PAUSED、dispatch gate closed，安全停止并释放 lease。第一次本地尝试把 Python venv 符号链接解析到基础解释器，子进程因此找不到 `ibapi`；保留 `ibkr-runtime/.venv/bin/python` 路径后复跑通过。两次均未进入 place/cancel 路径。
+- 补齐 Market/LMT `DAY` 从 Backtrader native order、proposal/outbox、风控、冻结 intent、账本、子进程 IPC 到 IBKR SDK order 的精确类型和价格传递；限价风控按限价金额估值。限价需精确匹配 intent，市场单不得携带限价。Backtrader 将 `DAY` 编码为当前 feed session 的日终时间，proxy 只接受该表示，不接受任意过期时间。
+- 新增真实 Cerebro + SQLite + callback bridge 的限价订单用例，断言 AAPL BUY 2 LMT $100 从 proposal 持久化到 native order，并由不高于限价的 fill 完成；transport 单测断言 SDK payload 保留 LMT $400.00。NL2 冻结策略仍是 MARKET，未将测试单冒充策略信号。
+- 回归：相关 host execution/Backtrader 集 **140 passed、19 subtests**；锁定 SDK runtime **48 tests OK**；`py_compile` 与 `git diff --check` 通过。
+- 仍未完成真实下单：主 API `127.0.0.1:8899` 的 PAPER 状态仍是 `NOT_CONFIGURED`；one-shot 配置驱动 API/生产 composition 尚无，且 B213 已确认 AAPL live bid/ask 与 USD/HKD FX 行情事实不可用。当前配置仍禁用、有效窗口为 2026-11-02 美股常规时段。本轮无下单/撤单、无策略 activation；T24 仍 NOT RUN。
+
+# B214 核实冻结策略是市价单，与已授权限价联调单不能混接（2026-10-31）
+
+- 从本地 `StrategyVersionStore` 读取冻结版本 `6885734a…a47186fa` 的真实记录：NL2 `sma_cross`、AAPL、1d completed-bar，`execution_policy.order_type=market`、DAY；position allocation 为账户权益 95%。one-shot integration-test JSON 则明确是 AAPL BUY 1 股、LMT $400 上限、配置禁用。两个对象的订单策略不同；不能把该策略 hash 的市价订单当作已授权 $400 限价联调单，也不能只凭单笔预算假定市价成交不越过 $400。
+- 因此初次 broker 写路径应走单独、精确读取该 one-shot LMT 配置的受限集成测试，完整绑定冻结策略/部署审计身份时需明确区分测试意图与策略信号。现有 API 没有这个配置驱动的写入入口，app 也没有可信 production composition；本次没有提交订单。
+
+# B213 用户重启后 PAPER Gateway 官方 runtime 再次对账通过；应用组合仍未安装（2026-10-31）
+
+- 用户手动重启后，重新通过固定配置的 PAPER 4002 endpoint 和锁定 SDK 子进程运行 `start_paused()` → `latest_reconciled_snapshot()` → `stop()`。快照 `capture_complete=true`、`reconciled=true`，必需账户摘要 3 项、币种 HKD，0 positions、0 open orders；runtime 保持 PAUSED、dispatch gate closed，`stop_confirmed=true` 且 owner lease 已释放。诊断 activation 永远 false，intent/contract loaders deny-only；没有 place/cancel 请求。证据库保留于 `~/.vibe-trading/paper-integration-test/runtime-readonly-after-user-restart-20261031T135906Z-c3e58b/paper.sqlite`。
+- 开发 API `127.0.0.1:8899/health` 返回 healthy；`/api/execution/paper/status` 仍是 `configured=false`、`NOT_CONFIGURED`，缺 runtime factory、策略 session builder、可归因授权、账户/对账事实、行情/verified contract、风险/成本事实。Gateway 重启已验证，不代表应用策略下单闭环已接通。
+- 重启后重新实取 AAPL 日线仍为 30 D=30、1 Y=251、5 Y=1,255，均到 2026-10-30，精确 qualified contract `conId=265598`。AAPL live quote 返回 IBKR 10089、无可执行双边盘口；delayed type 3 为 `last_only`；USD/HKD live 也没有双边 quote。数据历史可拉取，实时风险报价仍不足。
+- one-shot 配置仍 `enabled=false`，AAPL BUY 1 股 LMT $400，最高名义金额 $400；有效窗口为 2026-11-02 14:30–21:00 UTC。本次只做只读重连和对账，没有启用配置或下单。
+
+# B212 主应用真实端口仍为 NOT_CONFIGURED；新增 IBKR 完成日线 Feed source（2026-10-31）
+
+- 核对 `bash scripts/dev status` 后发现开发后端实际监听 `127.0.0.1:8899`（前端 5899），健康检查返回 healthy；PAPER status 返回 `configured=false`、`NOT_CONFIGURED` 和六项缺失要求。此前仅探测 8000 的记录不代表开发 API 未启动，已修正 B210 验收表述。
+- 新增 `IbkrPaperCompletedBarSource`：要求精确的 loopback PAPER read-only profile、固定 verified SMART/USD/STK contract/conId 和 pinned XNYS 日历；请求 Gateway TRADES/RTH 日线，校验 qualified contract、拒绝休市日/重复 bar，只返回已收盘 bar；增量模式检查 after_session 后每个已完成 XNYS session 都存在。Bar 保留 host-observed `available_at`，明确打上 point-in-time 与复权语义未经验证的质量标记；`publish()` 只允许推入匹配的 `PaperCompletedBarFeed`。
+- 使用本机 PAPER Gateway 实取 AAPL 最近 30 根并经同一 adapter 验证：30 根，2026-09-21 至 2026-10-30，最后 close 344.63；所有返回 Bar 均带 adjustment/PIT 未验证标记。connector/source + quote/risk 专项 **40 passed**；`py_compile` 与 `git diff --check` 通过。`publish()` 匹配 feed 与错误合约拒绝通过离线测试。
+- 限制：新 source 尚未连接到生产 composition、warm-up/checkpoint 或周期性 feed worker；市场数据 source 不能单独令 app ready。实时 AAPL 双边行情和 HKD/USD FX 仍缺 entitlement；没有启动策略或发订单。
+
+# B211 手动重启后再次实连官方托管 runtime 并安全停止（2026-10-31）
+
+- 使用 one-shot integration-test JSON 中明确固定的 PAPER loopback endpoint/account、锁定的 `ibkr-runtime/.venv/bin/python`、独立随机 client ID、新建权限受限 SQLite 与 owner-lock 路径构造 `IbkrPaperRuntimeFactory`。诊断 dependencies 的 activation 永远 false，intent/contract loader deny-only；没有构造策略 session 或发送订单。
+- 官方 runtime `start_paused()` 真实连接 Gateway 成功，managed account 与配置账号匹配；启动 reconciliation snapshot `capture_complete=true`、`reconciled=true`，含必需账户摘要 3 项（HKD），0 positions、0 open orders。状态 PAUSED、dispatch gate closed、owner lease held；随后 `stop()` 确认成功，lease 已释放。数据库保留在 `~/.vibe-trading/paper-integration-test/runtime-readonly-current-5eadda6b/paper.sqlite`。
+- 一次本地预校验因把 JSON profile 名误写为 Enum 名而在调用 Gateway 前退出；未启动子进程、未连接且无 broker side effect。修正值后使用全新数据库完整通过。
+- one-shot config 仍为 `enabled=false`；本轮未 activation、placeOrder、cancelOrder。实连证明 Gateway/runtime/strict reconciliation 可用，但不证明策略 session/feed、app factory 或 order/fill 闭环。
+
+# B210 Gateway 重启后复验历史 AAPL 数据、补齐风险快照刷新（2026-10-31）
+
+- 用户手动重启后的本机只读核验：IB Gateway PAPER `127.0.0.1:4002` 可连接；账户快照成功，包含 24 项摘要且币种为 HKD，当前 0 持仓、0 开放委托。AAPL 精确合约为 NASDAQ/SMART USD STK `conId=265598`。
+- 真实历史数据请求返回 AAPL 日线：30 D = 30 根（2026-09-21 至 2026-10-30），1 Y = 251 根（2025-10-31 至 2026-10-30），5 Y = 1,255 根（2021-11-01 至 2026-10-30）。这证明本账户/合约当前至少可读约五年日线；没有据此推断更长历史、分钟线或其他标的权限完整。
+- 实时报价档位仍不可用于交易：delayed/3 返回 last 345.10、close 348.91、无 bid/ask；live 请求返回 IBKR 10089（API 市场数据需额外订阅），`execution_ready=false`。HKD 账户余额实时折 USD 所需 USD/HKD 行情仍未就绪。
+- 新增 runtime risk-only snapshot refresh，可在 managed runtime PAUSED/RUNNING 状态请求新快照并严格对账，不改变恢复用 allocator 状态；风险 provider 可在 composition 时绑定准确 runtime。回归：managed runtime、reconciliation、risk facts、两个 session builder、managed deployment 专项 **60 passed**；composition factory、app wiring、dispatch/risk、market facts 专项 **85 passed**；合计两组 **145 passed**。`py_compile` 与 `git diff --check` 通过。修正了 runtime 测试辅助器对嵌套临时目录的初始化。
+- B210 当时只探测 `127.0.0.1:8000`，该端口无监听；开发服务实际端口为 8899，B212 现确认 API 健康但 PAPER status 为 `NOT_CONFIGURED`。production composition/factory 和行情/FX entitlement 仍未完成。当前订单配置仍禁用，且有效期窗口为 2026-11-02 14:30–21:00 UTC；B210 未启动 managed runtime、未发订单。
+
+# B209 quote API 透传 IBKR 行情订阅错误码，明确无订阅原因（2026-10-31）
+
+- `get_quote()` 现在捕获本次行情请求相关的 IBKR 订阅错误码（354/10089/10090/10168），与 quote 一起返回结构化 `market_data_errors`；没有数据时错误文本不会再推断“订阅不太可能是原因”。listener 在请求结束后移除，不影响共享 Gateway 后续调用。
+- 实连复验 AAPL PAPER `conId=265598`，单次请求 live 档返回 `no_data`、`execution_ready=false`，quote API 暴露 10168 和 Gateway 原始订阅提示（延迟数据未启用）。未触发订单路径。
+- 验收：IBKR connector + market-facts + PAPER risk-facts 定向组 **67 passed**；`py_compile` 和 `git diff --check` 通过。
+
+# B208 打通只读 quote 的行情档位覆盖并确认 PAPER 账户无实时订阅（2026-10-31）
+
+- 修复 `src.trading.service.get_quote()` 到本地 IBKR 配置的参数漏传：现在可以单次指定 `market_data_type=1` 探测 live entitlement；profile 仍强制 read-only，覆盖不持久化，也不影响订单控制。
+- 用户重启后的 PAPER Gateway 实测：AAPL `conId=265598` 显式请求 live 时返回 `no_data`/`execution_ready=false`，Gateway 报 IBKR 10168（无行情订阅，且延迟行情未启用）；此前同账户默认 delayed 请求可返回 last/close，但 bid/ask 为空。USD/HKD `IDEALPRO` 同样没有双边实时报价，只有 close。live request 不是报价，不能过风控。
+- 验收：quote service 参数覆盖用例加入 `test_ibkr_local.py`；IBKR connector + market-facts + PAPER risk provider 定向组 **66 passed**；`git diff --check` 通过。
+- 下单闭环的当前外部缺项是 PAPER 账户的 AAPL 实时行情 entitlement 与 USD/HKD 实时 FX；策略/feed 与风险 metrics 的生产 composition 仍未安装。既有单笔 integration-test 授权窗口为 2026-11-02 美股常规时段，本次只读探测没有订单副作用。
+
+# B207 IBKR PAPER 风险事实装配层拒绝缺失行情/账户/策略风险证据（2026-10-31）
+
+- 新增 `IbkrPaperRiskFactsProvider`：只接受配置中固定的 PAPER 账户、冻结策略 hash、`RiskGrant` 与合约映射；账户侧必须来自完整、近期且 reconciled 的快照，并核验 required account tags、持仓合约身份和行情新鲜度。市场数据必须是 IBKR 实际 live type 1、精确合约的双边盘口；HKD 等外币账户值仅通过显式 pin 的 USD/CCY `IDEALPRO` 合约 ask 折 USD。快照 reconciliation 已证明开放委托集合等于本地账本，因此 provider 的外部买入预留为 0，本地 reservation 仍由 ledger 在发送事务中原子计算。
+- 当日策略亏损、订单数、交易费用、价格缓冲没有被猜成 0：host 必须提供完整 `StrategyRiskMetrics`，缺失即拒绝生成 `RiskFacts`。该 provider 当前为可测试的装配能力，尚未由生产 factory 接线；不把它标记为 app readiness。
+- 验收：`../.venv/bin/pytest -q tests/execution/test_ibkr_paper_risk_facts.py tests/execution/test_ibkr_market_facts.py tests/test_ibkr_local.py`，**65 passed**；`git diff --check` 通过。用户重启后的本次只读 AAPL probe 为 PAPER connector `ok`，qualified `conId=265598`，实际行情档位 delayed/3、仅 last/close，`execution_ready=false`。
+- 限制：当前 quote 不满足 PAPER 订单风险检查；Gateway 接通不等于 app composition ready。主应用仍缺真实 session/feed、策略指标与成本来源、部署 factory 接线，真实订单没有提交；仍沿用已授权的 2026-11-02 美股常规交易时段窗口。
+
+# B206 IBKR 报价响应暴露实际行情档位与 execution readiness，增加 USD/HKD 风险事实原语（2026-10-31）
+
+- `get_quote()` 现在返回 Gateway 实际 `marketDataType`、精确 qualified contract/conId、host observation time、`quote_quality` 和独立 `execution_ready`。bid/ask/last/close 的 NaN、Infinity、零与 IBKR `-1` sentinel 归一化为 `null`；无效 sentinel 不再让 `_tick_has_data` 提前认为报价到达。仅实际 type 1 live + 有效双边盘口才标 `execution_ready=true`。
+- 新增 `IbkrExecutionQuote`，把 connector response 变成执行事实前校验 live 档位、精确合同映射、双边盘口及 freshness；新增 `convert_to_usd()`：非 USD 金额必须有新鲜、明确 USD/CCY `IDEALPRO` 报价，并以 ask 保守换算，不猜反向汇率。58 个 connector/market-facts 定向测试通过。
+- PAPER 实连只读 quote 返回：AAPL qualified `conId=265598`，Gateway 实际行情类型为 delayed/3，`quote_quality=last_only`，bid/ask 为 null，`execution_ready=false`。数据虽有 last/close，不能用于下单风控。USD/HKD 实时 FX entitlement 也尚未证实。
+- app status 仍 `NOT_CONFIGURED`，这些不是生产 facts provider 或 app composition；无单账户快照 provider/risk aggregation、成本事实、实时 feed 或生产 factory module。当前仍不能由合伙人通过应用启用策略，亦未提交 PAPER 订单；live 继续禁用。
+
+# B205 FastAPI PAPER composition 增加显式 deployment factory 加载入口（2026-10-31）
+
+- `api_server` lifespan 现在可读取受信任本地 Python 入口 `VIBE_PAPER_COMPOSITION_FACTORY=module:function`，调用工厂构造并安装 `PaperExecutionComposition`，仍遵守“构造不连接 Gateway”的约定。未设置时保持既有 inert manager；入口格式错误、导入/调用失败或返回非组合对象时 fail startup，不静默退回假 readiness。导入和工厂异常文本不会写入 startup error，避免配置值泄露。
+- 验收：`agent/tests/test_state_migration_wiring.py` 中 factory 成功安装但不启动 runtime、错误入口 fail-stop、未配置时保持 inert、显式 app-state 组合保持可用，定向 **4 passed**；`git diff --check` 通过。
+- 边界：这补齐 production deployment 的接入点，不是生产 provider。尚无真实 factory module 绑定 frozen session、completed-bar/feed、实时 quote、HKD→USD 账户/现金事实、费用与可归因授权；运行实例仍 `NOT_CONFIGURED`，T24 未通过。真实 PAPER 订单尚未提交。
+
+# B204 用户重启 Gateway 后再次完成只读 PAPER 对账并收紧单笔订单上限（2026-10-31）
+
+- 重启后 `POST /api/connections/ibkr-paper-integration-test/check` 返回 PAPER 4002 socket open、IBKR SDK installed、只读 connector 配置。随后使用锁定的 `ibkr-runtime/.venv/bin/python`、全新 SQLite/owner-lock 目录和独立 client ID，通过官方 runtime 完成 `start_paused()` → 当前账户/持仓/开放委托快照 strict reconciliation → `stop()`；快照 reconciled、0 持仓、0 开放委托、`NetLiquidation`/`TotalCashValue`/`AvailableFunds` 齐全（币种 HKD），停在 PAUSED，stop confirmed，lease 释放。
+- 首次诊断命令因把专用 Python 的符号链接解析到系统 Python，child 在 status 握手前退出；该次没有完成连接、也没有订单副作用。修正为保留虚拟环境可执行路径，并使用新目录重跑通过。两个诊断数据库均不复用。
+- 用户授权的一次性 AAPL BUY 1 PAPER integration-test 仍 `enabled=false`，允许窗口仍为 2026-11-02 09:30–16:00 ET。将订单从 MKT 改成 `LMT 400.00`，并将语义改为硬限价上限；最多 1 股，成交价不会高于 $400，费用储备另计。订单尚未提交。
+- 限价单贯穿风险检查、冻结 intent、子进程 IPC、官方 `ibapi.Order.lmtPrice` 和开单回报对账；运行时验证 LMT/DAY 有限正数限价，风险估值按限价计算，MKT 仍保留现有价格 buffer。修复官方 order factory 对 NaN/Infinity 限价的拒绝。
+- 验证：主 agent execution 组合 `106 passed, 19 subtests`；隔离 IBKR runtime `48 tests OK`；`git diff --check` 通过。应用 `GET /api/execution/paper/status` 仍 `NOT_CONFIGURED`，无生产 session/data/risk/provider composition；因此本轮只读对账成功不等于 UI 策略/交易闭环就绪。周末且授权窗口尚未来临，没有启动或提交订单。
+
+# B203 为 PAPER 控制接入逐人 operator token 与精确授权 CLI（2026-10-31）
+
+- `LOCAL_OPERATOR_TOKEN` 为具名鉴权方式；新增本地 `PaperOperatorTokenStore`，token 用 256-bit 随机值，SQLite 只保存 SHA-256 digest，支持过期和撤销，数据库权限为 `0600`。API `Authorization: Bearer` 可识别该 token；原 shared API key 与 loopback principal 继续不可归因，manager 的授权规则不放宽。
+- `python -m src.execution.paper_operator_tokens issue --subject <partner>` 本地签发一次性显示的 operator token；`grant`/`revoke-grant` 仅接受已有有效 operator 作为签发人，可按唯一 DU 账户、PAPER 与 start/activate/cancel/stop/recover 单动作精确授权；token 可用 `revoke` 单独吊销。前端现有 Bearer 存储可以直接承载 operator token。
+- 验证：`./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_operator_tokens.py agent/tests/test_security_auth_api.py agent/tests/execution/test_paper_control_grants.py --disable-warnings --tb=short`，退出码 0，**74 passed**。覆盖 hash-at-rest、身份解析、过期/吊销、共享 key 不归因、具体 scope/action grant。
+- 边界：没有为用户/伙伴签发 token 或交易 grant；CLI 尚未由生产 composition 调用。主 app 仍 `NOT_CONFIGURED`，缺账户/行情/风险 provider 和 runtime/session root；没有 Gateway 写操作或真实订单。
+
+# B202 用户再次重启 Gateway 后复验只读 PAPER runtime（2026-10-31）
+
+- 用户重启后，`POST /api/connections/ibkr-paper-integration-test/check` 再次确认本地 PAPER Gateway 4002 socket open、`ib_async` 已安装。使用一个新的隔离 SQLite 目录与独立 client ID，通过锁定的官方 IBKR runtime 完成 `start_paused()`、账户/持仓/开放委托快照 strict reconciliation 与 `stop()`；对账成功，0 持仓、0 开放委托，账户摘要必需 tags 齐全，runtime 停在 PAUSED 并确认释放 lease。
+- 本次首个诊断进程复用目录时，worker 在 status 握手前退出；没有连接或触发订单。使用新目录重跑完整通过。新证据支持“旧目录/本地状态触发 worker 启动问题”的可能性，但根因尚未定位，不能把它泛化为 Gateway 故障。
+- app `GET /api/execution/paper/status` 仍为 `NOT_CONFIGURED`，没有策略 session/feed、身份授权、风险/费用 facts 的生产 composition；runtime activation check 为 false，订单/合约 loader 为 deny-only，没有调用 activate、placeOrder 或 cancel。周六无可用 fresh quote；用户此前明确的单笔集成订单窗口为 2026-11-02 美东常规交易时段，故本次仅复验只读链，不提前发送订单。T24 仍 NOT RUN。
+
+# B201 Gateway 重启后完成真实只读账户对账与 IBKR 行情回测（2026-10-31）
+
+- 用户手动重启并登录后，Gateway UI 显示 IBKR API server 已连接、行情/历史数据 farm ON；本机 4002 监听。Connection Center 的 `ibkr-paper-integration-test` check 返回 `status=ok`、PAPER profile、SDK 已安装、目标 socket open、只读配置。账户标识不进入本日志。
+- 用锁定的官方 IBKR SDK runtime、显式 PAPER profile/账号/本地数据库启动一次 `start_paused()`。`managedAccounts` 精确账户匹配，`reqAccountSummary`、positions、open orders 均完成；strict reconciler 标记 snapshot reconciled。账户摘要币种为 HKD，包含 `NetLiquidation`、`TotalCashValue`、`AvailableFunds` 三项；本快照有 0 个持仓、0 个开放委托。运行时保持 PAUSED、dispatch gate closed，之后 `stop()` 确认成功并释放 owner lease；诊断数据库保留在 `~/.vibe-trading/paper-integration-test/runtime-readonly-after-restart-7c390367/paper.sqlite`。没有调用 activate/下单/撤单。
+- 使用 PAPER read-only history profile `ibkr-paper-local` 对 AAPL 拉取 2024-01-02 至 2025-12-31 的 502 根 USD STK / SMART / `conId=265598` 日线，基于 10/30 SMA 冻结策略完成真实 Backtrader 1.9.78.123 / BackBroker 回测：run `bt_20261031_130904_77d8b9d23db1`，16 笔回测成交，独立 replay integrity `verified`。该策略版本 hash `6885734a6d6b03e01c5ab3ab97ce0f3727c2b43ed60b619021758d06a47186fa` 与此前 yfinance 回测相同。
+- 周六只读 AAPL quote check 返回 market-data type `delayed`，bid/ask 为 NaN、仅有 last/close；虽然响应带有本机查询时间，休市+延迟数据不满足 integration-test 订单的 fresh-quote 前置条件。周一允许窗口内必须重新取价并验 RTH/时效。Gateway 全局 API Read-Only 开关状态尚未核实，也没有修改该设置。
+- IBKR 行情报告仍把 point-in-time 可用性、调整语义和 caller `instrument_id` 到 broker contract mapping 标成 UNVERIFIED；数据来源真实连接了 PAPER read-only API，不等于完全可信/完整数据许可。应用 `GET /api/execution/paper/status` 仍为 `NOT_CONFIGURED`，production composition、授权身份、风险/成本 facts 和 PAPER 策略会话/实时 feed 尚未接线；没有真实 PAPER order/ack/fill。
+- 本轮只读账户和历史行情验证改变了可行动证据：Gateway 登录冲突已由用户重启解决。余下缺项不能由一次 runtime smoke 或离线测试替代，详见 `BLOCKERS.md`。
+
+# B200 `NOT_CONFIGURED` 时也展示 PAPER 缺项（2026-10-31）
+
+- `/api/execution/paper/status` 实测返回 `NOT_CONFIGURED` 加六项缺失能力；Execution 页原先只在 runtime factory 已注册时才展示缺项，导致首次接入页面只显示笼统状态。现在未配置时也显示清单，并补齐“连接共用 Gateway 账户的 IBKR PAPER 运行时”中英文及其余语言文案。
+- 验收：`npm run test:run -- src/pages/__tests__/Execution.test.tsx`：15 passed；`npm run build` 退出码 0；`git diff --check` 通过。页面测试现在用真实 `configured=false` 状态验证缺项提示。
+- 当时 runtime 和 Gateway 状态仍 `NOT_CONFIGURED`；随后用户手动重启 Gateway 并完成只读对账，见 B201。没有 PAPER 订单副作用。
+
+# B198 单策略真实 Backtrader 回测与 PAPER Gateway 重连状态（2026-10-31）
+
+- 使用本地真实 API 完成一份受信任 NL2 模板路径：AAPL、10 日 SMA 上穿 30 日 SMA 买入/下穿卖出；`GET /runs/bt_20261031_125109_8762670e5a32` 返回 `success`，冻结版本 `6885734a6d6b03e01c5ab3ab97ce0f3727c2b43ed60b619021758d06a47186fa`，Backtrader 1.9.78.123 / BackBroker，502 根 provider 日线、472 根评估 bar、16 笔模拟回测订单与成交，独立 Backtrader integrity `verified`。这是**回测**，未连 IBKR 运行策略，也未下 Paper 订单。
+- 回测数据 provider 为 yfinance；报告明确标注 provider/调整/point-in-time 可用性未经验证、instrument_id 非 broker 合约认证，因此只证明真实引擎执行和冻结版本链，不作为 IBKR 行情完整性或策略效果证据。该版本可供后续为 PAPER 部署固定 hash。
+- 同一请求用 stooq 预览返回 `NoAvailableSourceError`，改用已配置 yfinance 成功。用户已明确允许重连并断开同用户名旧 Gateway 会话；通过桌面 CUA 尝试无障碍按钮和键盘操作后，Gateway 窗口状态仍无变化，重连尚未发生。没有开始新的 IBKR API client，也没有订单副作用。
+- 当前仍需继续：完成 Gateway 登录重连和只读账户快照；把这份冻结策略接进应用 PAPER composition；接上鲜活账户/行情/风控 facts；再通过暂停态恢复、显式启用及单笔 integration-test 跑通真实 ack/fill/position/reconciliation。前端入口、联调修复与验收结果见 B197。
+
+# B197 修复 PAPER 对账 request ID 范围并继续只读联调（2026-10-31）
+
+- PAPER 运行时账号格式检查从 `DU[0-9]+` 放宽至 `DU[A-Z0-9]+`：本机只读 connector 已返回唯一以 `DU` 开头、后缀含字母的 account ref；Gateway `managedAccounts` 仍需精确仅匹配配置账户。`agent/tests/execution/test_ibkr_paper_runtime_factory.py` 已通过。
+- 修复真实联调发现的请求 ID 缺陷：IBKR protobuf 的 `reqAccountSummary` request ID 是 32 位整数，旧运行时使用 62 位随机快照 ID，报 `Value out of range`。现默认与注入 ID 都限制于 `1..2^31-1`，越界先 fail-closed。修复后账户摘要回调实际到达；其中三个关键摘要字段以 HKD 返回，不是 USD。snapshot store 现保留 ISO-4217 原币种并要求关键字段在同一币种齐全，美元风控仍必须显式换算。
+- 同一快照完成后，Gateway 重复回发相同 `accountSummaryEnd(reqId)`；adapter 仅忽略刚完成快照的这条重复标记。连接期间随后出现 IBKR `2110`（Gateway/TWS 到 IBKR server 断连），运行时暂停且未生成完整账户快照。IB Gateway UI 当前明确显示 `SSLHandshakeException: Remote host terminated the handshake`；本机 4002 仍监听，但 Gateway 到 IBKR server 的会话不可用。
+- 最后一次启动未通过恢复，运行时报告 `ManagedRuntimeError`；`stop()` 未确认安全 quiescence，诊断 DB 的持久控制状态为 `STOPPING/awaiting_quiescence`。SDK child、callback worker、health monitor 均已退出，OS owner lock 已释放；该诊断 DB 保留作审计，不复用。没有调用 `activate()` / `placeOrder()`，没有订单或账户交易副作用。
+- 用户确认伙伴共用同一个 IB Gateway PAPER 账户；不做多账户/多租户。应用仍 `NOT_CONFIGURED`：策略 session builder、单一控制身份授权、风险/费用 facts 与行情/合约 production provider 未在 app root 注册，当前不能通过 UI 创建并运行 PAPER 策略。
+- 前端 PAPER 状态区新增“连接并对账（保持暂停）”和独立“启用模拟策略”操作；API 仍绑定服务端唯一冻结版本，启动恢复后先保持 PAUSED。由于当前 composition 未安装，这两个控制目前不会显示，不能误认为 UI 已能运行 PAPER。
+- 测试：`pytest -q agent/tests/execution/test_ibkr_paper_runtime_factory.py agent/tests/execution/test_ibkr_managed_runtime.py agent/tests/execution/test_ibkr_reconciliation.py agent/tests/execution/test_ibkr_callback_pump.py`：98 passed；IBKR SDK callbacks：14 passed；前端 `npm run test:run -- src/pages/__tests__/Execution.test.tsx`：15 passed；`npm run build` 与 `git diff --check` 通过。尚无完整只读对账、UI 到真实 app composition 的闭环或纸面订单。
+- Gateway 当前检测到另一同用户名会话并弹出“重新连接此会话”确认。未点击、未断开该会话；等待用户确认后恢复真实账户联调。
+- 变更：`ibkr_paper_runtime_factory.py`、`ibkr_managed_runtime.py`、`ibkr_reconciliation.py`、`ibkr_callback_pump.py`、IBKR runtime callback adapter、4 组后端测试、前端 PAPER 控制 API/组件/测试、`DECISIONS.md`。
+
+# B196 PAPER integration-test 本机预配置与联调现状（2026-10-31）
+
+- 本机开发服务已运行：`bash scripts/dev status` 显示 backend/frontend 分别在 8899/5899；`GET /health` 返回 healthy。`GET /api/execution/paper/status` 仍为 `NOT_CONFIGURED`，缺 `ibkr_runtime_factory`、`strategy_session_builder`、`attributable_control_authorizer`、`account_reconciliation_facts`、`market_data_verified_contracts`、`risk_cost_facts`。`GET /runs` 返回空数组，当前没有已冻结策略版本。
+- 使用 `ibkr-paper-local` 只读连接连到本机 Gateway PAPER 4002，确认一个 `DU` 模拟账户并读取账户摘要（不记账户号/余额）；没有读取持仓。已保存只读连接配置到 `~/.vibe-trading/ibkr-local.json`，文件权限 0600。此配置不允许下单。
+- 已在应用 Connection Center 创建 `ibkr-paper-integration-test` 只读连接。`POST /api/connections/{id}/check`（端口 4002）返回 `connector_status=ok`、PAPER、socket open、SDK installed、一个 paper account；该 profile 自身不使用 `account_ref` picker，底层只读配置已绑定到唯一 DU 账户。无凭据写入。
+- 只读行情：AAPL delayed quote 请求成功，但交易所休市时不能作为新鲜订单风控报价；另从 Gateway 拉取到 2026-10-30 最近 10 根日线，qualified USD STK SMART 合约 `conId=265598`，10/30 收盘 344.63。真实发送前仍须在订单窗口内取得新鲜报价和账户对账。
+- 用户已选首轮走单笔 `integration-test`。已建立本机 `~/.vibe-trading/paper-integration-test.json`（0600，`enabled=false`，显式人工触发）：AAPL BUY 1 股，单笔预交易缓冲名义金额上限 400 美元，5% 缓冲、1 美元费用预留、单会话最多 1 单，窗口为 2026-11-02 09:30–16:00 ET。该上限是发送前风险估值，MKT 成交价仍可能变化；只有新鲜报价估值通过上限才可发送。日期用项目固定 XNYS 4.13.2 日历解析为 11/02 14:30–21:00 UTC。
+- **尚未接入/验收：** 单笔订单配置目前未被主应用消费；主应用 PAPER manager 仍 inert。integration-test API/session、可信风控 facts 与本机控制身份未接线。没有发送任何订单、没有创建订单记录或持仓副作用；本轮没有改代码或运行测试。
+
 # B195 配置本机常驻隔离 Python worker（2026-10-22）
 
 - 在本机 Docker context `colima-vibe-execution` 离线构建 Python worker，基础镜像使用 Dockerfile 已固定 digest 的 Python 3.12；读取构建产物 image ID 并将其作为 `VIBE_PYTHON_WORKER_IMAGE=sha256:...` 写入用户级 `~/.vibe-trading/.env`，同时固定 `DOCKER_CONTEXT=colima-vibe-execution`。配置文件权限为 0600，没有复制或输出其他环境变量。

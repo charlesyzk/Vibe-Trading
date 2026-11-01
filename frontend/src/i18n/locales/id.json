@@ -6,6 +6,7 @@
     "paperLastErrorCode": "Kode error runtime terakhir",
     "paperMissingRequirementsTitle": "Yang diperlukan untuk melengkapi kesiapan PAPER",
     "paperRequirement": {
+      "ibkr_runtime_factory": "Runtime IBKR PAPER yang terhubung ke akun Gateway bersama.",
       "strategy_session_builder": "Pembuat sesi yang memuat versi strategi yang disetujui dan tidak dapat diubah.",
       "attributable_control_authorizer": "Otorisasi operator yang terikat pada mandat PAPER yang eksplisit.",
       "account_reconciliation_facts": "Identitas akun broker, posisi, order terbuka, dan bukti rekonsiliasi.",

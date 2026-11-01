@@ -1,3 +1,87 @@
+# B234 停止后 PAPER 历史读取已修复；真实订单验收待窗口（2026-11-01）
+
+- 已为固定 PAPER composition 绑定受信 scope 的本地账本，停止或应用重启后 activity API 可读取该 scope 的持久订单历史，不连接 Gateway；当前持仓标记 unknown，页面提示重新连接并对账。相关后端 63 项、Execution 页面 18 项测试及前端构建通过。重启 API 后实际 GET activity 返回 0 订单及 unknown positions；fixture 测试验证已存订单、停止后重读及其他账户隔离。
+- 补充 API fixture 回归：模拟 ACK→FILL 与 REJECT 写入账本后，在停止状态读取到 FILLED、成交编号及 REJECTED，且其他账户订单不泄露；该用例不代表真实 IBKR 回报。
+- 真实单笔 PAPER ACK/reject、fill 和持仓 reconciliation 仍待授权窗口内验证。
+
+# B233 停止后 PAPER 活动历史无法在页面读取（历史记录，已由 B234 修复）
+
+- `PaperExecutionManager.activity_snapshot()` 在没有活动 runtime 时抛出 `PaperRuntimeUnavailable`，因此停止后 `/api/execution/paper/activity` 返回不可用，Execution 页不能直接读取已持久化的订单/成交历史。账本保存在 `paper-integration-test/execution.sqlite`；当前四张订单表均为空，尚无真实模拟单回报。
+- 需要在已配置的受信 PAPER scope 下提供不启动 Gateway 的只读历史，并清楚区分历史快照与当前新鲜 broker positions。不得从本地 fill 推断券商持仓；需覆盖停止、重启、scope 隔离和权限回归。
+- 单笔窗口与真实 Gateway ACK/reject、fill 和持仓 reconciliation 的外部验收仍待完成。
+
+# B229 上传回测到兼容候选链路已修复；真实券商单笔回报仍待验
+
+- 本轮最后核验发现并修复两个生产链路断点：预览/确认的默认数值哈希差异，以及 XNYS 外部日历名与 `us_equity_rth` 运行时策略键不一致。IBKR PAPER fetch 的服务器一次性凭证现从精确市场快照验证、进入报告，直到候选资格；定向测试已覆盖创建报告并产生 compatible candidate。
+- 伙伴可以按手册创建并冻结 Python 策略、做 Backtrader 回测、查看兼容候选并选择部署。当前 PAPER 部署包络仍限 AAPL BUY 1 股、LMT `$400`、DAY、RTH-only、最多一笔；不兼容版本会解释阻断原因。
+- 未解决的最终外部核验是 2026-11-02 14:30–21:00 UTC 内操作员显式连接同一 Paper Gateway、运行单笔并观察 IBKR accepted/rejected callback、fill（如发生）和新鲜持仓 reconciliation。此闭环尚无真实订单证据；LIVE 仍禁用。
+
+# B228 已接入受限 candidate selection；新策略和券商回报仍待验
+
+- 已提供只在 runtime STOPPED 且 one-shot 账本为空时运行的策略选择动作；选中的版本必须有成功完整性验证的 IBKR PAPER Backtrader 单日报告，并证明 exact AAPL BUY 1 LMT `$400`。动作会 pin version、生成专用报告 attestation、重建 composition 并记录具名 operator 审计，不下单。
+- 当前实际候选里只有固定 integration-test 版本通过；SMA 模板候选不兼容。UI/API 新版本选择逻辑通过测试，并已对当前 pin 版本实际调用一次；还没拿到另一个真实用户创建的兼容版本验证 selection。
+- 真实模拟交易入口仍只允许原授权单笔和窗口；IBKR accepted/rejected callback、fill、fresh position reconciliation 尚无实盘模拟订单证据。用户说明这部分由合伙人按已接通的流程实现/验证。LIVE 保持禁用。
+
+# B227 当前可执行状态
+
+- API 重启后仍处于健康状态；固定 PAPER composition READY，但 runtime `STOPPED`、dispatch gate closed、lease 未持有。同版本回测证明有效，订单配置已启用，窗口尚未开放。订单和 reservation 四张账本表均为 0 行。
+- 目前可按已授权窗口验证单笔固定 AAPL 流程；这不等于通用策略部署。候选接口仍只读，没有将伙伴新建的冻结策略绑定并切换为 PAPER deployment 的 action；SMA/NL MARKET + target-fraction 候选与本次 LMT/显式股数封套不兼容。
+- 真实单笔 PAPER 下单、IBKR callback、成交及持仓 reconciliation 需在 `2026-11-02 14:30–21:00 UTC` 窗口内显式触发；LIVE 保持禁用。
+
+# B226 候选策略可见；尚未提供通用 frozen-version PAPER deploy
+
+- `/api/execution/paper/strategy-candidates` 已从成功 run、完整性 sidecar 与冻结版本库生成只读目录。实测固定 AAPL Python LMT 联调版本可用；NL2 SMA 版本虽然 Backtrader report replay verified，但其 MARKET 与 target-fraction policy 不匹配当前固定的 AAPL BUY 1 LMT `$400` envelope，也没有 production NL2 PAPER composition。
+- Execution 页可看到每版回测 provenance、执行策略形状和兼容状态。这个目录没有版本切换/部署 API，也没有为任意版本配置 risk grant、market facts、在线状态预热和 account-scope composition；不能把候选可见说成可部署。
+- 下一工程环节需把风险授权绑定到版本和明确订单包络，构造相同 version/report 的受信任 session，在不创建第二账户 owner、且无旧未结账本工作的条件下更新 deployment，并做重启/回报对账用例。真实固定单 ack/fill/position 仍待 2026-11-02 有效窗口；LIVE 保持关闭。
+
+# B225 同版本回测证明已绑定；真实 PAPER 成交与通用策略部署仍未验收
+
+- 当前 fixed one-shot app composition 在装载和 action 前均要求冻结版本匹配的 Backtrader/BackBroker report，report replay 标记为 verified，data manifest hash 一致，并通过本地完整版本 ID artifact sidecar 校验。新 Gateway 拉取的 AAPL 历史报告已验证，app 重启后也已真实完成 READY/PAUSED 对账与安全停止。该 sidecar 不构成来源签名或防本机恶意篡改证明。
+- 尚未在 Gateway 下发订单，因此 IBKR accepted/rejected ACK、execution fill、broker positions 的真实闭环仍缺；明确单笔订单只在 `2026-11-02 14:30–21:00 UTC` 窗口显式触发。
+- 主 app 仍固定 pinned one-shot AAPL 版本。没有让伙伴将自己的 Python-upload frozen version 与成功回测 report 绑定后，选择并建立对应 PAPER deployment 的工作流；当前不能把联调策略报告或本次只读连接称为通用策略可交易。
+
+# B223 第二次 PAPER start 409 已修复；真实单笔成交对账与通用策略部署仍未验收
+
+- 同一 API 进程两轮连续完成 app-managed PAPER start、fresh reconciled snapshot 与 stop；第二次启动问题来自 snapshot reader 将已关闭 SDK wrapper 的历史 PID 误读为活动状态。现以 runtime 的关闭证明为前置，同时检查 lease、worker/monitor、callback 队列和 callback inbox；每次 managed session 使用新 completed-bar feed。**45 项相关回归通过**，真实 PAPER 订单尚未发出。
+- 下一项订单验收仍限于明确配置的 AAPL BUY 1、LMT `$400.00`、DAY、RTH-only 和窗口 `2026-11-02 14:30–21:00 UTC`，到时检查 IBKR ack/reject、fill 与 fresh positions reconciliation。
+- 更大的产品缺口仍在：当前主 app composition 固定绑定 one-shot 联调版本，尚不能让合伙人从自己的冻结且 Backtrader 回测通过的版本目录中选择一般策略并创建对应 PAPER deployment。T24 真实订单证据与通用策略部署体验仍未完成；live 保持禁用。详见 `ACCEPTANCE.md` / `PROGRESS.md` B223。
+
+# B222 单笔 PAPER 伙伴入口已就绪；等待真实订单回报与持仓对账验收
+
+- B221 已经在实际主应用完成具名 operator 授权的 managed runtime start、PAPER Gateway 握手与账户/持仓/开放委托严格对账，然后安全停止并释放 lease。B222 为 Execution 页加入专用单笔入口，按钮会按当前 config 与 UTC window 禁用/开放，并在 action 后自动暂停、刷新券商账户/挂单/持仓 facts。当前应用仍 STOPPED、派单闸门关闭。详情见 `ACCEPTANCE.md` B221–B222 与 `PROGRESS.md` B221–B222。
+- **剩余验收：** 等待配置窗口 `2026-11-02 14:30–21:00 UTC`，用具名 operator 在页面显式执行；随后核验 IBKR accepted/rejected callback、成交事实，以及经 broker snapshot reconciliation 的 positions。配置最多 PAPER AAPL BUY 1 股 LMT `$400.00`、DAY、RTH-only。单测与模拟 runtime 组合不代替真实 broker write/fill 证据。
+- 账户摘要可用字段仅 HKD，AAPL live 双边行情因 IBKR 10089 不可用；此专用固定限价路径不伪造 USD cash、AAPL quote 或 FX，购买力由 IBKR PAPER 接受/拒绝。必须以观察到的真实 callback 和账户对账作为结果证据，不得把已发单当成已成交。历史行情仍不证明 point-in-time availability、adjustment semantics 或数据授权。
+
+# B218 实时行情和 USD 购买力事实仍未就绪；one-shot 生产 composition 缺失
+
+- Gateway 重启后用 PAPER read-only profile 重探 AAPL 与 USD/HKD live quotes：AAPL 返回 IBKR 10089，无双边行情；USD/HKD 无双边报价。账户风险摘要必要 tag 只见 HKD，没有 USD AvailableFunds/TotalCashValue；当前 0 持仓、0 开放委托。不能把限价上限混同为购买力证据，或假造报价/汇率。
+- B219 的固定限价风险 primitive 已有 B220 专用 snapshot provider；provider 尚未接 manager/API action 或 app composition，主应用仍未注册 PAPER composition，也没有 one-shot 真实回报验收。后续完成明确 operator action→真实 PAPER place/ack/fill/position reconciliation。配置仍 disabled。详情见 `ACCEPTANCE.md` / `PROGRESS.md` B218–B220。
+
+# B217 Gateway 重启后只读对账再次成功；主应用仍未配置单笔订单闭环
+
+- 用户重启后本次 PAPER 4002 handshake、strict account/positions/open-orders reconciliation 成功，0 持仓、0 挂单；runtime 停在 PAUSED、send gate closed，停止后 owner lease 已释放。没有策略 session、activate、place 或 cancel。主 API 仍 `NOT_CONFIGURED`；one-shot LMT 配置仍 `enabled=false`，下单窗口是 2026-11-02 14:30–21:00 UTC。
+- 当前需要继续完成的产品链路是把严格配置解析器接入独立、显式操作的 one-shot 测试入口，并装配真实 manager/session/账本/callback 回报；不能重用现存冻结 MARKET 策略。已知 AAPL live bid/ask 与 USD/HKD FX entitlement 不可用，需为固定限价联调建立不捏造行情/购买力的风险依据。T24 仍 NOT RUN。证据见 `ACCEPTANCE.md` / `PROGRESS.md` B217。
+
+# B214 当前冻结策略是 MARKET；授权联调单是 LMT，缺少独立单笔 PAPER 联调入口
+
+- B215 已将 `limit_price` 精确贯穿离线事件 proposal、风控、持久 intent、Backtrader native limit order、IBKR 子进程 IPC 和 SDK order factory，并完成模拟 callback fill 回归。B216 已新增 one-shot 配置的严格只读 parser/contract，但尚未接入 API/manager。冻结策略 `6885734a…a47186fa` 仍为 AAPL `sma_cross` MARKET/DAY、95% 权益 allocation；不能把它冒充成 one-shot LMT 测试。仍缺独立 LMT test strategy/run、受限 app action、生产组合和可用的账户/风险事实 provider。B213 live AAPL bid/ask 与 USD/HKD FX entitlement 仍缺。B215 证明 Gateway 重启后的只读握手和账户对账，不含真实订单。详情见 `ACCEPTANCE.md` / `PROGRESS.md` B215–B216。
+
+# B213 重启后 PAPER runtime 对账通过；生产 app composition 与订单/成交闭环仍未就绪
+
+- 用户这次手动重启后，锁定 SDK 子进程再次完成 PAPER runtime 握手、strict account/positions/open-orders reconciliation，并安全停止释放 lease：0 持仓、0 挂单。开发 API 在 8899 健康，但 PAPER status 仍 `NOT_CONFIGURED`，策略 session、授权、事实 provider 与应用 factory 未装配。AAPL live bid/ask 和 USD/HKD live FX entitlement 缺失，风险 provider 不能给出真实可执行事实。one-shot AAPL BUY 1 LMT $400 配置仍禁用；有效窗口是周一 2026-11-02 美股常规时段；本次没有下单。详情见 `ACCEPTANCE.md` B213 和 `PROGRESS.md` B213。
+
+# B212 托管 runtime/历史 bar source 可用；生产 app composition、实时行情权限与策略 feed worker 未就绪
+
+- B211 刚重启的真实 PAPER Gateway 可由锁定 SDK 子进程接入：PAUSED strict reconciliation 完成，0 持仓/0 开放委托，safe stop 后释放 lease。B212 新增并实读只读日线 feed source，最近 30 根符合 XNYS/精确 AAPL `conId=265598`；B210 已读 5 年 1,255 根日线。此前 live 请求已得到 IBKR 10168；B210 live 请求返回 10089（API 需要额外订阅），delayed/3 仍只有 last/close，缺 bid/ask。USD/HKD 没有 live 双边报价，无法实时折算 HKD 购买力。证据见 `ACCEPTANCE.md` B204/B206/B208/B209/B210/B211/B212。
+- 已新增 `IbkrPaperRiskFactsProvider`，可从完整已对账快照、固定合约、live 双边 quote 和固定 USD/CCY FX 合约构建 `RiskFacts`；但它尚未由 production factory 调用，也没有已实现的策略每日亏损、当日订单数、费用与实时 feed 来源。运行实例 `/api/execution/paper/status` 仍为 `NOT_CONFIGURED`；部署 factory module、IBKR runtime/session/feed、operator token + grant authorizer 接线仍缺。B203 operator identity 基础设施尚未给伙伴签发，也尚未由 composition 使用。
+- 后端当前在 `127.0.0.1:8899` 健康运行，但 `/api/execution/paper/status` 为 `NOT_CONFIGURED`；此前对 8000 的探测不是 dev server 端口。历史 source 还未接入生产 composition、warm-up/checkpoint 或周期性 feed worker，风险/费用 metrics 与 operator grants 未接线。因此当前 UI 仍不能启动策略或发受限 PAPER 单；没有 PAPER order/ack/fill。实时行情/FX entitlement 或 source 质量不满足时，风险门必须保持关闭。Gateway 全局 API Read-Only 设置仍未核实或更改；Live 保持禁用。
+
+# B199 历史联调阻塞：Gateway 重连弹窗曾无法由桌面控制执行（已由用户重启解除）
+
+- 用户已明确允许重连；桌面控制工具无法操作弹窗，之后用户手动重启 Gateway 并恢复连接，详见 B201。
+- 独立离线进展：`bt_20261031_125109_8762670e5a32` 是成功真实 Backtrader/BackBroker 的 AAPL 10/30 SMA 回测，策略冻结 hash `6885734a6d6b03e01c5ab3ab97ce0f3727c2b43ed60b619021758d06a47186fa`；yfinance 数据 provider 真实性和历史 point-in-time 仍为 UNVERIFIED。stooq 预览为 `NoAvailableSourceError`。
+- B199 时应用 `/api/execution/paper/status` 为 `NOT_CONFIGURED`，无账户快照和订单。Gateway 会话冲突已解决；PAPER app composition / provider wiring 与受限订单闭环仍未完成。
+
 # B184–B192 离线 fail-closed 边界已加固；生产事实源和真实 PAPER 仍阻塞
 
 - PAPER composition/start 现在拒绝缺失/错配策略版本 pin；Python worker 启动要求 daemon 报告 builtin/default seccomp 且显式请求 builtin。Importer 拒绝时区换算后跨交易日的 schedule。策略线程失败后，callback worker 仍持久化 broker callback、接收受授权管理动作，未 ACK delivery 等待显式恢复。

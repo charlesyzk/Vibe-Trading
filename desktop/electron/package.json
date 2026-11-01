@@ -10,6 +10,8 @@
     "build": "tsc && node scripts/copy-static.mjs",
     "start": "npm run build && npm run prepare:electron && electron .",
     "test:locales": "npm run build && node scripts/test-locales.mjs",
+    "test:request-authorization": "npm run build && node scripts/test-request-authorization.cjs",
+    "smoke:operator-auth": "npm run build && electron scripts/smoke-operator-auth.cjs",
     "test:backend-resolution": "npm run build && node scripts/test-backend-resolution.mjs",
     "test:update-safety": "npm run build && node scripts/test-update-safety.mjs",
     "test:packaging-preparation": "node scripts/test-packaging-preparation.mjs",

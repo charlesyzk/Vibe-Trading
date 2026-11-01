@@ -2,8 +2,9 @@
 
 Uploaded source never enters the Backtrader process. The trusted bridge releases
 one completed bar and JSON checkpoint to a one-shot isolated worker, validates
-the returned Market/DAY proposal, and submits it as a native Backtrader Order
-to the real BackBroker. Explicit share quantities are never resized here.
+the returned proposal against the frozen order policy, and submits it as a
+native Backtrader Order to the real BackBroker. Explicit share quantities are
+never resized here.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from src.execution.python_sandbox import PythonSandbox
 from src.execution.versions import StrategyVersionStore
 from src.bt_runtime.report_replay import (
     ReportReplayMismatch,
+    normalize_unfilled_orders_at_data_end,
     replay_backtrader_order_log_subprocess,
     verify_python_report_replay,
 )
@@ -164,11 +166,14 @@ def run_python_upload_backtest(
             records=records,
             evaluation_start=manifest.evaluation_start,
             evaluation_end=manifest.evaluation_end,
+            execution_policy=normalized.execution_policy,
+            frozen_parameters=normalized.parameters,
             sandbox=sandbox,
             event_coordinator=event_coordinator,
         )
     )
     strategy = cerebro.run()[0]
+    normalize_unfilled_orders_at_data_end(strategy.order_rows)
     position = strategy.getposition(strategy.data)
     stable_refs = {row["order_ref"]: index for index, row in enumerate(strategy.order_rows.values(), start=1)}
     orders = tuple(_stable({**row, "order_ref": stable_refs[engine_ref]}) for engine_ref, row in strategy.order_rows.items())
@@ -199,7 +204,11 @@ def run_python_upload_backtest(
             "cost": {
                 "commission_model": "BackBroker percentage commission",
                 "commission_rate": str(commission_rate),
-                "slippage_model": "BackBroker percentage slippage at next-bar market open; capped to bar range",
+                "slippage_model": (
+                    "BackBroker percentage slippage with native limit-price matching; capped to bar range"
+                    if any(row.get("order_type", "market") == "limit" for row in strategy.decision_rows)
+                    else "BackBroker percentage slippage at next-bar market open; capped to bar range"
+                ),
                 "slippage_fraction": str(slippage_fraction),
             },
         },
@@ -289,6 +298,8 @@ def _make_python_strategy(
     records: tuple[Bar, ...],
     evaluation_start: date,
     evaluation_end: date,
+    execution_policy: Any,
+    frozen_parameters: dict[str, Any],
     sandbox: PythonSandbox,
     event_coordinator: Any | None = None,
 ):
@@ -372,22 +383,60 @@ def _make_python_strategy(
             if self.pending_order is not None:
                 self._fail_run("strategy proposed a new order while a native order is still active")
             proposal = proposals[0]
+            expected_quantity = frozen_parameters.get("quantity")
+            if expected_quantity is not None and proposal.integer_qty != expected_quantity:
+                self._fail_run("strategy proposal differs from its frozen explicit quantity")
+            expected_limit = frozen_parameters.get("limit_price_usd")
+            if expected_limit is not None and (
+                proposal.limit_price is None
+                or Decimal(str(proposal.limit_price)) != Decimal(str(expected_limit))
+            ):
+                self._fail_run("strategy proposal differs from its frozen limit price")
+            if (
+                proposal.order_type != execution_policy.order_type
+                or proposal.time_in_force != execution_policy.time_in_force
+            ):
+                self._fail_run("strategy proposal differs from the frozen execution policy")
             if proposal.side == "SELL" and proposal.integer_qty > int(self.position.size):
                 self._fail_run("sell proposal exceeds the current long position; shorting is disabled")
-            order = self.buy(size=proposal.integer_qty) if proposal.side == "BUY" else self.sell(size=proposal.integer_qty)
+            submit = self.buy if proposal.side == "BUY" else self.sell
+            if proposal.order_type == "limit":
+                assert proposal.limit_price is not None
+                order = submit(
+                    size=proposal.integer_qty,
+                    exectype=bt.Order.Limit,
+                    price=float(proposal.limit_price),
+                    # The decision is made on the completed bar; DAY validity
+                    # therefore ends with the following regular session.
+                    valid=(
+                        records[self.event_index].end_at
+                        if self.event_index < len(records)
+                        else bar.end_at + timedelta(days=1)
+                    ),
+                )
+            else:
+                order = submit(size=proposal.integer_qty)
             self.pending_order = order
-            self.decision_rows.append({
+            decision_row = {
                 "seq": self.event_index,
                 "session_date": bar.session_date.isoformat(),
                 "side": proposal.side,
                 "requested_qty": proposal.integer_qty,
                 "reason": proposal.reason,
-            })
+            }
+            if proposal.order_type == "limit":
+                decision_row.update({
+                    "order_type": proposal.order_type,
+                    "limit_price": str(proposal.limit_price),
+                })
+            self.decision_rows.append(decision_row)
             self.order_rows[order.ref] = {
                 "order_ref": order.ref,
                 "side": proposal.side,
                 "requested_qty": proposal.integer_qty,
                 "reason": proposal.reason,
+                "order_type": proposal.order_type,
+                "limit_price": float(proposal.limit_price) if proposal.limit_price is not None else None,
                 "status": order.getstatusname(),
                 "status_history": [order.getstatusname()],
                 "decision_date": bar.session_date.isoformat(),

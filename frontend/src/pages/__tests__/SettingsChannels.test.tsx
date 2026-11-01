@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { Settings } from "../Settings";
+import i18n from "@/i18n";
 
 const apiMock = vi.hoisted(() => ({
   getLLMSettings: vi.fn(),
@@ -125,7 +126,9 @@ function channelsConfig() {
 }
 
 describe("Settings IM channels panel", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await i18n.changeLanguage("en");
+    vi.clearAllMocks();
     apiMock.getLLMSettings.mockResolvedValue(llmSettings());
     apiMock.getDataSourceSettings.mockResolvedValue(dataSourceSettings());
     apiMock.getChannelStatus.mockResolvedValue(channelStatus());
@@ -138,6 +141,21 @@ describe("Settings IM channels panel", () => {
     });
     apiMock.startChannels.mockResolvedValue(channelStatus({ running: true }));
     apiMock.stopChannels.mockResolvedValue(channelStatus());
+  });
+
+  it("exposes the operator credential field in desktop mode", async () => {
+    window.vibeDesktop = {
+      isDesktop: true,
+      getCredentialStatus: vi.fn(),
+      setCredential: vi.fn(),
+      restartBackend: vi.fn(),
+    };
+    try {
+      render(<Settings />);
+      expect(await screen.findByLabelText(/server api key/i)).toBeInTheDocument();
+    } finally {
+      delete window.vibeDesktop;
+    }
   });
 
   it("renders channel runtime status and refreshes it", async () => {

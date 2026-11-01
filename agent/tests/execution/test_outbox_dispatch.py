@@ -358,7 +358,7 @@ def test_modified_outbox_proposal_pauses_run_before_authorization(tmp_path):
     [
         (_intent(decision_id="forged-decision"), "FAKE", Decimal("10"), "host identity"),
         (_intent(), "IBKR", Decimal("10"), "authorizing grant"),
-        (_intent(), "FAKE", Decimal("11"), "authorized quote"),
+        (_intent(), "FAKE", Decimal("11"), "authorized price anchor"),
     ],
 )
 def test_intent_audit_fields_must_match_authorization(tmp_path, intent, broker, quote, match):
