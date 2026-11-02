@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ const testDirectory = await mkdtemp(path.join(os.tmpdir(), "vibe-desktop-parent-
 const readyFile = path.join(testDirectory, "ready.json");
 const userData = path.join(testDirectory, "user-data");
 const output = [];
+let lastListenerError = "";
 const unrelatedPython = await startUnrelatedPythonSentinel();
 const electronMain = spawn(electronPath, [electronRoot, "--disable-gpu"], {
   cwd: electronRoot,
@@ -40,7 +41,11 @@ try {
   assert.equal(ready.mainPid, electronMain.pid, "Spawned Electron PID did not match its main PID");
   assert.equal(typeof ready.backendPid, "number");
   assert.match(ready.backendOrigin, /^http:\/\/127\.0\.0\.1:\d+$/u);
-  assert.equal(await listenerAcceptsConnections(ready.backendOrigin), true);
+  await waitForCondition(
+    () => listenerAcceptsConnections(ready.backendOrigin),
+    20_000,
+    () => `Backend listener ${ready.backendOrigin} did not become reachable: ${lastListenerError}`,
+  );
   assert.equal(isProcessAlive(ready.backendPid), true);
 
   await killOnlyProcess(ready.mainPid);
@@ -70,12 +75,24 @@ try {
     unrelatedPythonPid: unrelatedPython.pid,
     unrelatedPythonSurvived: true,
   }, null, 2));
+} catch (error) {
+  console.error("Installed desktop smoke failed:", error);
+  const logsDirectory = path.join(userData, "logs");
+  try {
+    for (const name of (await readdir(logsDirectory)).filter((value) => /^desktop-\d+\.log$/u.test(value))) {
+      const content = await readFile(path.join(logsDirectory, name), "utf8");
+      console.error(`Desktop backend log (${name}):\n${content.slice(-32000)}`);
+    }
+  } catch (logError) {
+    console.error("Desktop backend log unavailable:", String(logError));
+  }
+  throw error;
 } finally {
   if (electronMain.pid && isProcessAlive(electronMain.pid)) {
-    await killOnlyProcess(electronMain.pid);
+    await killOnlyProcess(electronMain.pid).catch((error) => console.error("Electron cleanup:", String(error)));
   }
   if (ready?.backendPid && isProcessAlive(ready.backendPid)) {
-    await killProcessTree(ready.backendPid);
+    await killProcessTree(ready.backendPid).catch((error) => console.error("Backend cleanup:", String(error)));
   }
   await unrelatedPython.stop();
 }
@@ -98,9 +115,12 @@ async function waitForReadyFile(filePath, timeoutMs, child, capturedOutput) {
 
 async function listenerAcceptsConnections(origin) {
   try {
-    await fetch(new URL("health", `${origin}/`), { signal: AbortSignal.timeout(1_000) });
+    const response = await fetch(new URL("health", `${origin}/`), { signal: AbortSignal.timeout(3_000) });
+    if (!response.ok) throw new Error(`health returned HTTP ${response.status}`);
+    lastListenerError = "";
     return true;
-  } catch {
+  } catch (error) {
+    lastListenerError = `${String(error)}${error?.cause ? `; cause: ${String(error.cause)}` : ""}`;
     return false;
   }
 }
@@ -120,7 +140,7 @@ async function waitForCondition(predicate, timeoutMs, errorMessage) {
     if (await predicate()) return;
     await delay(100);
   }
-  throw new Error(errorMessage);
+  throw new Error(typeof errorMessage === "function" ? errorMessage() : errorMessage);
 }
 
 function killOnlyProcess(pid) {

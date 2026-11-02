@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -310,29 +311,30 @@ def test_request_is_bounded_before_preflight(monkeypatch):
         sandbox.run_json({"payload": "too large"})
 
 
-def test_bounded_pipe_helper_round_trips_json_without_shell(tmp_path):
-    # Fake the Docker CLI transport only; no uploaded/user Python is evaluated.
-    fake_docker = tmp_path / "docker"
-    fake_docker.write_text(
-        "#!/bin/sh\n"
-        "cat >/dev/null\n"
-        "printf '{\"worker\":\"stub\"}'\n",
-        encoding="utf-8",
+def test_bounded_pipe_helper_round_trips_json_without_shell():
+    returncode, stdout, stderr = python_sandbox._communicate_bounded(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read(); sys.stdout.write('{\"worker\":\"stub\"}')"],
+        b'{"request":1}\n', timeout=2, max_output_bytes=128,
     )
-    fake_docker.chmod(0o755)
-
-    previous_path = os.environ.get("PATH", "")
-    try:
-        os.environ["PATH"] = f"{tmp_path}:{previous_path}"
-        returncode, stdout, stderr = python_sandbox._communicate_bounded(
-            [str(fake_docker)],
-            b'{"request":1}\n',
-            timeout=2,
-            max_output_bytes=128,
-        )
-    finally:
-        os.environ["PATH"] = previous_path
 
     assert returncode == 0
     assert json.loads(stdout) == {"worker": "stub"}
     assert stderr == b""
+
+
+def test_threaded_pipe_helper_handles_large_input_and_both_outputs():
+    code = "import sys; d=sys.stdin.buffer.read(); sys.stdout.buffer.write(str(len(d)).encode()); sys.stderr.write('ok')"
+    result = python_sandbox._communicate_bounded_threaded([sys.executable, "-c", code], b"x" * 200000,
+                                                           timeout=5, max_output_bytes=128)
+    assert result == (0, b"200000", b"ok")
+
+
+def test_threaded_pipe_helper_enforces_combined_output_and_deadline():
+    with pytest.raises(SandboxOutputLimit):
+        python_sandbox._communicate_bounded_threaded(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x'*80); sys.stderr.write('y'*80)"],
+            b"", timeout=3, max_output_bytes=100)
+    with pytest.raises(SandboxTimeout):
+        python_sandbox._communicate_bounded_threaded(
+            [sys.executable, "-c", "import time; time.sleep(5)"], b"x" * 2_000_000,
+            timeout=0.2, max_output_bytes=100)

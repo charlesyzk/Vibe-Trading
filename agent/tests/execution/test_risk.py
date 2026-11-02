@@ -62,6 +62,19 @@ def test_risk_allows_exact_request_and_binds_a_deterministic_snapshot():
     assert first.risk_snapshot_id == second.risk_snapshot_id
 
 
+def test_grant_can_be_issued_before_window_but_never_used_early_or_before_issue():
+    start = NOW + timedelta(hours=1)
+    grant = make_grant(granted_at=NOW, valid_from=start, valid_until=start + timedelta(hours=1))
+    order = ProposedOrder(instrument_id="AAPL", side="BUY", integer_qty=1)
+    assert "grant_expired_or_not_yet_valid" in evaluate_order_risk(grant, order, make_facts()).reason_codes
+    at_open = make_facts(now=start, quote_as_of=start, account_as_of=start)
+    assert evaluate_order_risk(grant, order, at_open).allowed
+    at_close = make_facts(now=grant.valid_until, quote_as_of=grant.valid_until, account_as_of=grant.valid_until)
+    assert "grant_expired_or_not_yet_valid" in evaluate_order_risk(grant, order, at_close).reason_codes
+    future_issued = make_grant(granted_at=NOW + timedelta(minutes=1))
+    assert "grant_not_yet_issued" in evaluate_order_risk(future_issued, order, make_facts()).reason_codes
+
+
 def test_risk_counts_existing_strategy_exposure_and_all_account_reservations():
     grant = make_grant(strategy_budget="900")
     decision = evaluate_order_risk(

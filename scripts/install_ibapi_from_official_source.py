@@ -35,7 +35,10 @@ def source_tree_sha256(source_dir: Path) -> tuple[str, int]:
     setup = root / "setup.py"
     if not package.is_dir() or package.is_symlink() or not setup.is_file() or setup.is_symlink():
         raise ValueError("source_dir must contain a regular setup.py and ibapi/ source directory")
-    files = [setup, *sorted(package.rglob("*"))]
+    # WindowsPath ordering folds case while PosixPath ordering does not. Sort
+    # portable relative strings so the same source tree has one digest on all
+    # supported build hosts.
+    files = [setup, *sorted(package.rglob("*"), key=lambda path: path.relative_to(root).as_posix())]
     digest = hashlib.sha256()
     count = 0
     for path in files:

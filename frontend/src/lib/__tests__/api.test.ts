@@ -25,6 +25,15 @@ describe("generated report download", () => {
 });
 
 describe("api request helper", () => {
+  it("shows validation fields and reasons without echoing rejected input", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      detail: [{ loc: ["body", "setup", "valid_until"], msg: "Value error, entry window must fall within one session", input: "private-input" }],
+    }), { status: 422, headers: { "content-type": "application/json" } })));
+    const { api } = await loadApiModule();
+    await expect(api.getChannelStatus()).rejects.toMatchObject({
+      status: 422, message: "setup.valid_until: Value error, entry window must fall within one session",
+    });
+  });
   it("translates the server's message-size error into a recovery instruction", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       detail: { code: "message_too_long", max_length: 100_000, message: "Shorten input" },

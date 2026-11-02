@@ -376,6 +376,21 @@ class ManagedPythonPaperSession:
             raise ValueError("idle_poll_seconds must be between 10 ms and 5 seconds")
         return record
 
+    def _last_committed_bar(self) -> Bar | None:
+        """Recover the strategy's monotonic cursor from the verified journal."""
+        prefix = self.journal.read_committed_prefix(self.run_id)
+        last = None
+        for event in prefix.events:
+            if set(event.payload) != {"bar"}:
+                raise ManagedPythonPaperSessionError("committed event has no exact bar")
+            bar = Bar.model_validate(event.payload["bar"])
+            if bar.instrument_id not in self.feeds or not bar.is_final:
+                raise ManagedPythonPaperSessionError("committed event bar is outside the strategy feed")
+            if last is not None and (bar.instrument_id != last.instrument_id or bar.end_at <= last.end_at):
+                raise ManagedPythonPaperSessionError("committed event bars are not strictly ordered")
+            last = bar
+        return last
+
     def start_paused(self) -> dict[str, Any]:
         """Connect/reconcile, hydrate from a fresh snapshot, then idle Cerebro PAUSED."""
         with self._lock:
@@ -417,9 +432,11 @@ class ManagedPythonPaperSession:
                 raise ManagedPythonPaperSessionError(
                     "ledger changed during snapshot recovery; native orders remain unattached"
                 ) from exc
+            last_committed_bar = None
             if isinstance(self.coordinator, PythonEventCoordinator):
                 try:
                     self.coordinator.shadow_replay_committed_prefix(self.run_id)
+                    last_committed_bar = self._last_committed_bar()
                 except Exception as exc:
                     self.journal.pause_run(self.run_id)
                     raise ManagedPythonPaperSessionError(
@@ -497,7 +514,7 @@ class ManagedPythonPaperSession:
                 execution_service=self.runtime.service,
                 intent_resolver=resolver,
             )
-            self.cerebro.addstrategy(_SessionStrategy, bridge=bridge)
+            self.cerebro.addstrategy(_SessionStrategy, bridge=bridge, initial_last_bar=last_committed_bar)
             self._started = True
             self._thread = threading.Thread(
                 target=self._run_cerebro,
@@ -590,9 +607,11 @@ class ManagedPythonPaperSession:
                 raise ManagedPythonPaperSessionError(
                     "account snapshot changed before callback quiescence"
                 ) from exc
+            last_committed_bar = None
             if isinstance(self.coordinator, PythonEventCoordinator):
                 try:
                     self.coordinator.shadow_replay_committed_prefix(self.run_id)
+                    last_committed_bar = self._last_committed_bar()
                 except Exception as exc:
                     self.journal.pause_run(self.run_id)
                     raise ManagedPythonPaperSessionError(
@@ -730,7 +749,7 @@ class ManagedPythonPaperSession:
                 execution_service=self.runtime.service,
                 intent_resolver=resolver,
             )
-            cerebro.addstrategy(_SessionStrategy, bridge=bridge)
+            cerebro.addstrategy(_SessionStrategy, bridge=bridge, initial_last_bar=last_committed_bar)
             self.cerebro = cerebro
             self._recovery_event = (retry_event, retry_bar)
             self._recovery_created_intent_id = (
@@ -1198,7 +1217,12 @@ class ManagedPythonPaperSession:
                 raise ManagedPythonPaperSessionError("session is already stopping or stopped")
             if not self._stopping and any(feed.pending_bar_count for feed in self.feeds.values()):
                 raise ManagedPythonPaperSessionError("queued completed bars must be processed before stopping")
-            self.runtime.pause(reason="strategy_session_stop")
+            control_state, _reason = self.runtime.service.state()
+            if control_state is ExecutionControlState.STOPPING:
+                if not self._stopping or not self.runtime.service.lease_held:
+                    raise ManagedPythonPaperSessionError("unexpected STOPPING state without this session's owner lease")
+            else:
+                self.runtime.pause(reason="strategy_session_stop")
             if not self._stopping:
                 try:
                     # Stop is a distinct control action: freeze both the

@@ -4,7 +4,10 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 import os
-import pwd
+try:
+    import pwd
+except ImportError:  # Windows has no pwd module; Docker fixture is POSIX-only.
+    pwd = None
 import queue
 import sqlite3
 import subprocess
@@ -175,6 +178,7 @@ class FakeRuntimeProcess(IbkrRuntimeProcess):
         self.cancel_calls = []
         self.auto_ack_on_send = False
         self.auto_fill_on_send = True
+        self.execution_time = "20261021  06:00:00"
         self.next_valid_id = 1
         self.snapshot_positions = []
         self.snapshot_open_orders = []
@@ -238,7 +242,7 @@ class FakeRuntimeProcess(IbkrRuntimeProcess):
                     "order_id": payload["broker_order_id"], "account": order["account_ref"],
                     "side": "BOT" if order["action"] == "BUY" else "SLD",
                     "shares": str(order["quantity"]), "price": "101.0",
-                    "time": "20261021  06:00:00", "symbol": contract["symbol"],
+                    "time": self.execution_time, "symbol": contract["symbol"],
                     "contract_id": contract["con_id"], "security_type": contract["security_type"],
                     "currency": contract["currency"],
                 }.items()))))
@@ -887,12 +891,13 @@ def test_fatal_callback_worker_failure_pauses_session_journal_and_scope(tmp_path
         allocator.close()
 
 
-def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backtrader(tmp_path):
+@pytest.mark.parametrize("symbol,quantity", [("AAPL", 2), ("MSFT", 5)])
+def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backtrader(tmp_path, symbol, quantity):
     database = tmp_path / "managed-order.sqlite"
     runtime, service, ledger, index, allocator = _make_runtime(tmp_path, database)
     versions = StrategyVersionStore(tmp_path / "versions")
     version = versions.create_version(
-        _spec(), upload_source=b"def on_event(event, state): return {}\n",
+        StrategySpec.model_validate({**_spec().model_dump(mode="json"), "instrument_ids": [symbol]}), upload_source=b"def on_event(event, state): return {}\n",
         engine_version="backtrader/1.9.78.123", compiler_version="vibe-python-event/1",
     )
     journal = SQLiteEventJournal(database)
@@ -902,12 +907,12 @@ def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backt
     )
     coordinator = PythonEventCoordinator(
         journal=journal, versions=versions,
-        sandbox=NoProposalSandbox([{"side": "BUY", "integer_qty": 2, "reason": "entry"}]),
+        sandbox=NoProposalSandbox([{"side": "BUY", "integer_qty": quantity, "reason": "entry"}]),
     )
     grant = RiskGrant.model_validate({
         "grant_id": "grant-managed", "user_action_id": "approval-managed",
         "strategy_version_hash": version.version_hash, "broker": "IBKR",
-        "account_ref": "paper-session", "environment": "paper", "allowed_instruments": ["AAPL"],
+        "account_ref": "paper-session", "environment": "paper", "allowed_instruments": [symbol],
         "allowed_order_types": ["market"], "long_only": True, "whole_shares": True,
         "max_order_notional": "10000", "max_gross_exposure": "100000",
         "strategy_budget": "50000", "max_daily_loss": "1000", "max_orders_per_session": 10,
@@ -922,14 +927,14 @@ def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backt
             broker="IBKR", account_ref="paper-session", environment=Environment.PAPER,
             deployment_id="deployment-1", strategy_version_hash=version.version_hash,
             input_event_seq=proposal.seq, action_index=proposal.proposal_index,
-            bar_end=proposal.bar.end_at, instrument_id="AAPL", side="BUY", integer_qty=2,
+            bar_end=proposal.bar.end_at, instrument_id=symbol, side="BUY", integer_qty=quantity,
             reference_price=Decimal("100"), eligible_at=NOW,
             expires_at=NOW + timedelta(minutes=30), risk_snapshot_id="a" * 64,
         )
         decision = RiskDecision(
             allowed=True, reason_codes=(), checked_at=NOW, risk_snapshot_id="a" * 64,
-            estimated_notional=Decimal("200"), estimated_cost=Decimal("200"),
-            projected_strategy_exposure=Decimal("200"), projected_gross_exposure=Decimal("200"),
+            estimated_notional=Decimal(100 * quantity), estimated_cost=Decimal(100 * quantity),
+            projected_strategy_exposure=Decimal(100 * quantity), projected_gross_exposure=Decimal(100 * quantity),
         )
         return AuthorizedProposal(intent, decision, "IBKR", Decimal("100"))
 
@@ -941,11 +946,11 @@ def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backt
             grant=grant,
             facts=RiskFacts(
                 broker="IBKR", account_ref="paper-session", environment=Environment.PAPER,
-                strategy_version_hash=version.version_hash, instrument_id="AAPL", now=NOW,
+                strategy_version_hash=version.version_hash, instrument_id=symbol, now=NOW,
                 quote_as_of=NOW, account_as_of=NOW, quote_price=Decimal("100"),
                 price_buffer_fraction=Decimal("0.01"), estimated_fees=Decimal("1"),
                 net_liquidation=Decimal("10000"), available_cash=Decimal("9000"),
-                positions=(PositionFact(instrument_id="AAPL", quantity=0, market_price=Decimal("100")),),
+                positions=(PositionFact(instrument_id=symbol, quantity=0, market_price=Decimal("100")),),
                 strategy_position_qty=0, strategy_buy_reservations=Decimal("0"),
                 account_buy_reservations=Decimal("0"), strategy_daily_loss=Decimal("0"),
                 orders_this_session=0, account_snapshot_complete=True,
@@ -962,19 +967,19 @@ def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backt
         process=runtime.process,
         intent_loader=ledger.get_intent,
         contract_loader=lambda _instrument: {
-            "con_id": 123, "symbol": "AAPL", "security_type": "STK",
+            "con_id": 123, "symbol": symbol, "security_type": "STK",
             "exchange": "SMART", "primary_exchange": "NASDAQ", "currency": "USD",
         },
     )
     runtime.cancel_transport = IbkrSubprocessCancelTransport(process=runtime.process)
     feed = PaperCompletedBarFeed(
-        instrument_id="AAPL", timezone="America/New_York", queue_size=4,
+        instrument_id=symbol, timezone="America/New_York", queue_size=4,
         idle_poll_seconds=0.01, now=lambda: NOW,
     )
     session = ManagedPythonPaperSession(
         runtime=runtime, run_id="run-order", version_store=versions, version_id=version.version_id,
         journal=journal, coordinator=coordinator, handoff=handoff, dispatch=dispatch,
-        feeds={"AAPL": feed}, data_by_con_id={123: feed},
+        feeds={symbol: feed}, data_by_con_id={123: feed},
         resolve_contract_identity=lambda instrument: ContractIdentity(123, instrument, "STK", "USD"),
         queue_size=4, idle_poll_seconds=0.01, now=lambda: NOW,
     )
@@ -997,7 +1002,7 @@ def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backt
     principal = Principal(subject="managed-session-human", auth_method=AuthMethod.FEDERATED_IDENTITY)
     manager.activate(scope, principal)
     session.push_completed_bar(Bar(
-        instrument_id="AAPL", session_date=date(2026, 10, 20),
+        instrument_id=symbol, session_date=date(2026, 10, 20),
         start_at=NOW.replace(day=20, hour=13, minute=30),
         end_at=NOW.replace(day=20, hour=20), available_at=NOW.replace(day=20, hour=20),
         timezone="America/New_York", open=Decimal("100"), high=Decimal("102"),
@@ -1024,6 +1029,8 @@ def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backt
         f"order_status={[order.getstatusname() for order in session.broker.orders.values()]}, "
         f"ledger={ledger.recovery_snapshot_for_scope(broker='IBKR', account_ref='paper-session', environment=Environment.PAPER)}"
     )
+    assert runtime.process.order_sends[0]["contract"]["symbol"] == symbol
+    assert runtime.process.order_sends[0]["order"]["quantity"] == quantity
     assert native_order is not None and native_order.status == native_order.Completed, (
         f"status={None if native_order is None else native_order.getstatusname()}, "
         f"ledger={ledger.recovery_snapshot_for_scope(broker='IBKR', account_ref='paper-session', environment=Environment.PAPER)}, "
@@ -1031,9 +1038,9 @@ def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backt
         f"router={session.callback_router.pending_count}, broker_queue={session.broker._callback_queue.qsize()}, "
         f"worker_error={runtime.callback_worker.failure}, pump_error={runtime.callback_pump._fatal}"
     )
-    assert native_order.executed.size == 2
-    assert session.broker.getposition(session.feeds["AAPL"]).size == 2
-    assert session.broker.getcash() == pytest.approx(8798.0)
+    assert native_order.executed.size == quantity
+    assert session.broker.getposition(session.feeds[symbol]).size == quantity
+    assert session.broker.getcash() == pytest.approx(9000 - 101 * quantity)
     # Native Order completion is applied before the deferred durable inbox ACK
     # is committed. Observe that acknowledgment explicitly instead of racing
     # the callback worker at the end of this asynchronous integration path.
@@ -1047,7 +1054,7 @@ def test_managed_session_runs_risked_order_through_fake_ibkr_callback_into_backt
     )
     assert recovery.unresolved_sends == () and recovery.active_orders == ()
     intent_id = next(iter(session.port._native_bindings.values()))
-    assert ledger.get_order(intent_id).filled_qty == 2
+    assert ledger.get_order(intent_id).filled_qty == quantity
     assert index.pending_inbox() == []
     assert manager.stop(scope, principal) is True
     assert service.state()[0] is ExecutionControlState.STOPPED
@@ -1660,6 +1667,8 @@ def test_blocked_managed_strategy_still_persists_fill_and_authorized_exact_cance
 def test_managed_session_real_worker_timeout_pauses_run_but_keeps_callback_and_cancel_alive(
     tmp_path, monkeypatch,
 ):
+    if pwd is None:
+        pytest.skip("Docker integration fixture requires POSIX account metadata")
     context = os.environ.get("DOCKER_CONTEXT", "colima-vibe-execution")
     actual_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     docker_config = Path(os.environ.get("DOCKER_CONFIG", actual_home / ".docker"))
@@ -2306,6 +2315,11 @@ def test_managed_session_restores_partial_buy_before_resuming_python_checkpoint(
         # may reach the Python worker using the exact persisted checkpoint.
         session.activate()
         assert service.state()[0] is ExecutionControlState.RUNNING
+        # A restarted draft may enqueue its original signal again. It must
+        # not create a second event or repeat the committed order proposal.
+        session.push_completed_bar(first_bar)
+        wait_for(lambda: feed.current_completed_bar == first_bar and feed.pending_bar_count == 0,
+                 "duplicate initial signal was not consumed")
         session.push_completed_bar(next_bar)
         wait_for(lambda: reopened_journal.get_checkpoint("run-checkpoint-order")["event_count"] == 2,
                  "resumed strategy event did not commit")
@@ -2784,6 +2798,11 @@ def test_managed_start_stages_committed_outbox_intent_until_explicit_activation(
         time.sleep(0.05)
         assert runtime.process.order_sends == []  # PAUSED queue does not create a native order.
         if stop_before_activation:
+            runtime._external_quiesce_check = lambda: False
+            assert session.stop() is False
+            assert service.state()[0] is ExecutionControlState.STOPPING
+            assert service.lease_held is True
+            runtime._external_quiesce_check = lambda: True
             assert session.stop() is True
             assert service.state()[0] is ExecutionControlState.STOPPED
             assert service.lease_held is False
@@ -3139,3 +3158,124 @@ def test_failed_recovery_sends_exact_created_intent_before_retrying_released_bar
         ]
         assert not leaked_execution_threads, leaked_execution_threads
         allocator.close()
+
+
+def test_daily_scheduler_drives_real_managed_session_across_two_days(tmp_path):
+    from src.execution.paper_daily_scheduler import PaperDailyScheduler
+
+    database = tmp_path / "managed-scheduled.sqlite"
+    runtime, service, ledger, _index, allocator = _make_runtime(tmp_path, database)
+    versions = StrategyVersionStore(tmp_path / "versions")
+    version = versions.create_version(_spec(), upload_source=b"def on_event(event, state): return {}\n",
+        engine_version="backtrader/1.9.78.123", compiler_version="vibe-python-event/1")
+    journal = SQLiteEventJournal(database)
+    journal.create_run(run_id="daily-run", deployment_id="deployment-1", account_ref="paper-session",
+        environment=Environment.PAPER, strategy_version_hash=version.version_hash)
+    clock = [NOW]
+    class SecondDaySandbox:
+        def run_json(self, request):
+            count = request["state"].get("events", 0) + 1
+            return SimpleNamespace(response={"protocol_version": request["protocol_version"],
+                "request_id": request["request_id"], "event_id": request["event_id"], "state": {"events": count},
+                "order_proposals": [{"side": "BUY", "integer_qty": 2, "reason": "second-day"}] if count == 2 else []})
+    coordinator = PythonEventCoordinator(journal=journal, versions=versions, sandbox=SecondDaySandbox(), now=lambda: clock[0])
+    grant = RiskGrant.model_validate({"grant_id": "daily-grant", "user_action_id": "fixture",
+        "strategy_version_hash": version.version_hash, "broker": "IBKR", "account_ref": "paper-session",
+        "environment": "paper", "allowed_instruments": ["AAPL"], "allowed_order_types": ["market"],
+        "long_only": True, "whole_shares": True, "max_order_notional": "1000", "max_gross_exposure": "1000",
+        "strategy_budget": "1000", "max_daily_loss": "100", "max_orders_per_session": 2,
+        "valid_from": NOW - timedelta(minutes=1), "valid_until": datetime(2026, 10, 23, 20, tzinfo=timezone.utc),
+        "quote_max_age_seconds": 30, "account_max_age_seconds": 60, "halt_action": "pause_and_cancel_owned",
+        "liquidation_policy": "none", "granted_at": NOW})
+    def facts():
+        return RiskFacts(broker="IBKR", account_ref="paper-session", environment=Environment.PAPER,
+            strategy_version_hash=version.version_hash, instrument_id="AAPL", now=clock[0],
+            quote_as_of=clock[0], account_as_of=clock[0], quote_price=Decimal("100"),
+            price_buffer_fraction=Decimal("0.01"), estimated_fees=Decimal("1"), net_liquidation=Decimal("10000"),
+            available_cash=Decimal("9000"), positions=(PositionFact(instrument_id="AAPL", quantity=0, market_price=Decimal("100")),),
+            strategy_position_qty=0, strategy_buy_reservations=Decimal("0"), account_buy_reservations=Decimal("0"),
+            strategy_daily_loss=Decimal("0"), orders_this_session=0, account_snapshot_complete=True)
+    handoff = PythonOutboxIntentHandoff(journal=journal, ledger=ledger, authorize=RiskAwareProposalAuthorizer(
+        lambda _: ProposalRiskInputs(grant=grant, facts=facts(), eligible_at=clock[0],
+                                     expires_at=datetime(2026, 10, 22, 20, tzinfo=timezone.utc))))
+    dispatch = PaperOrderDispatchService(ledger=ledger,
+        facts_provider=lambda *_a, **_k: DispatchRiskSnapshot(grant=grant, facts=facts(), deployment_id="deployment-1"),
+        sender=lambda *_a, **_k: pytest.fail("managed port owns sender"), now=lambda: clock[0])
+    runtime.paper_transport = IbkrSubprocessPaperTransport(process=runtime.process, intent_loader=ledger.get_intent,
+        contract_loader=lambda _: {"con_id": 123, "symbol": "AAPL", "security_type": "STK", "exchange": "SMART",
+                                   "primary_exchange": "NASDAQ", "currency": "USD"})
+    runtime.process.execution_time = "20261022  11:00:00"
+    feed = PaperCompletedBarFeed(instrument_id="AAPL", timezone="America/New_York", queue_size=4,
+                                 idle_poll_seconds=0.01, now=lambda: clock[0])
+    session = ManagedPythonPaperSession(runtime=runtime, run_id="daily-run", version_store=versions,
+        version_id=version.version_id, journal=journal, coordinator=coordinator, handoff=handoff, dispatch=dispatch,
+        feeds={"AAPL": feed}, data_by_con_id={123: feed},
+        resolve_contract_identity=lambda instrument: ContractIdentity(123, instrument, "STK", "USD"),
+        queue_size=4, idle_poll_seconds=0.01, now=lambda: clock[0])
+    scope = PaperRuntimeScope("IBKR", "paper-session", Environment.PAPER)
+    manager = PaperExecutionManager(runtime_factory=lambda _: session, startup_readiness=PaperExecutionReadiness(
+        strategy_session_builder=True, attributable_control_authorizer=True, account_and_reconciliation_facts=True,
+        market_data_and_verified_contracts=True, risk_and_cost_facts=True),
+        control_authorizer=lambda _principal, _scope, action: action in {"activate", "stop"})
+    principal = Principal(subject="fixture-human", auth_method=AuthMethod.FEDERATED_IDENTITY)
+    def daily(day):
+        return Bar(instrument_id="AAPL", session_date=date(2026, 10, day),
+            start_at=datetime(2026, 10, day, 13, 30, tzinfo=timezone.utc),
+            end_at=datetime(2026, 10, day, 20, tzinfo=timezone.utc),
+            available_at=datetime(2026, 10, day, 20, tzinfo=timezone.utc),
+            timezone="America/New_York", open=Decimal("100"), high=Decimal("101"), low=Decimal("99"),
+            close=Decimal("100"), volume=Decimal("1000"), currency="USD", is_final=True,
+            source="fixture", adjustment="unadjusted")
+    manager.start(scope)
+    stopped = False
+    try:
+        manager.activate(scope, principal)
+        session.push_completed_bar(daily(20))
+        def wait_for_cursor(expected):
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if session.exception is not None:
+                    raise session.exception
+                with sqlite3.connect(database) as db:
+                    row = db.execute("SELECT next_seq FROM execution_run WHERE run_id='daily-run'").fetchone()
+                if row and row[0] == expected:
+                    return
+                time.sleep(0.01)
+            pytest.fail(f"daily cursor did not reach {expected}")
+        wait_for_cursor(2)
+        token = manager.scheduled_session_token(scope)
+        clock[0] = datetime(2026, 10, 22, 15, tzinfo=timezone.utc)
+        scheduler = PaperDailyScheduler(manager=manager, scope=scope, version_id=version.version_id, initial_bar=daily(20),
+            source=lambda **_: (daily(21),), valid_from=NOW, valid_until=datetime(2026, 10, 23, 20, tzinfo=timezone.utc),
+            now=lambda: clock[0], is_current=lambda: manager.is_scheduled_session_current(scope, token))
+        assert scheduler.tick()
+        wait_for_cursor(3)
+        assert not scheduler.tick()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if session.exception is not None:
+                raise session.exception
+            if session.broker.orders and next(iter(session.broker.orders.values())).status == bt.Order.Completed:
+                break
+            time.sleep(0.01)
+        assert len(runtime.process.order_sends) == 1
+        assert runtime.process.order_sends[0]["order"]["quantity"] == 2
+        assert session.broker.getposition(feed).size == 2
+        # Backtrader updates its position before the durable inbox ACK is
+        # necessarily committed. Stop must wait until callback delivery has
+        # actually completed, particularly on slower Windows filesystems.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not runtime.order_index.pending_inbox() and not runtime.order_index.pending_callbacks():
+                break
+            time.sleep(0.01)
+        assert not runtime.order_index.pending_inbox()
+        assert not runtime.order_index.pending_callbacks()
+        stopped = manager.stop(scope, principal)
+        assert stopped
+    finally:
+        try:
+            if not stopped:
+                manager.stop(scope, principal)
+        finally:
+            allocator.close()

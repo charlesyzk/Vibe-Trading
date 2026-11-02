@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -93,3 +96,29 @@ def test_one_local_process_owns_the_allocator_path(tmp_path):
     first.close()
     second = IbkrOrderIdAllocator(path)
     second.close()
+
+
+def test_allocator_lock_excludes_another_process_and_releases_on_exit(tmp_path):
+    path = tmp_path / "execution.sqlite"
+    code = (
+        "import sys,time; from src.execution.ibkr_order_ids import IbkrOrderIdAllocator; "
+        "owner=IbkrOrderIdAllocator(sys.argv[1]); print('OWNER_READY', flush=True); time.sleep(20)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(path)], cwd=Path(__file__).resolve().parents[2],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "OWNER_READY"
+        with pytest.raises(RuntimeError, match="another local execution process"):
+            IbkrOrderIdAllocator(path)
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+        if child.stdout is not None:
+            child.stdout.close()
+        if child.stderr is not None:
+            child.stderr.close()
+    reopened = IbkrOrderIdAllocator(path)
+    reopened.close()

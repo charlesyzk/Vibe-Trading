@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import nullcontext
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status as http_status
@@ -14,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.api.security import require_auth, require_event_stream_auth
 from src.api.state import _get_paper_execution_manager, _get_paper_execution_readiness
 from src.api.state import _set_paper_execution_composition
+from src.config.paths import get_runtime_root
 from src.execution.order_ledger import ExecutionControlState, InvalidActivityCursor
 from src.execution.contracts import is_sha256
 from src.execution.paper_execution_manager import (
@@ -23,8 +26,14 @@ from src.execution.paper_execution_manager import (
     PaperRuntimeStatus,
 )
 from src.execution.paper_execution_readiness import PaperExecutionReadiness
+from src.execution.paper_execution_composition import PaperExecutionComposition
 from src.execution.paper_integration_test_composition import PaperSignalSessionMismatch
 from src.execution.paper_strategy_candidates import list_paper_strategy_candidates
+from src.execution.paper_order_preparation import PaperOrderSetup, prepare_verified_paper_order, suggest_paper_entry_window
+from src.execution.paper_order_draft import load_paper_order_draft, save_paper_order_draft
+from src.execution.paper_draft_runner import PaperDraftRunError
+from src.execution.local_paper_gateway_discovery import PaperGatewayDiscoveryError, discover_local_paper_gateway
+from src.execution.risk import ProposedOrder
 from src.execution.paper_strategy_deployment import (
     PaperStrategyDeploymentError,
     commit_paper_strategy_selection,
@@ -89,6 +98,16 @@ class PaperStrategySelectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy_version_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    run_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+
+class PaperOrderPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    strategy_version_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    order: ProposedOrder
+    setup: PaperOrderSetup | None = None
 
 
 class PaperCancelOrderResponse(BaseModel):
@@ -182,6 +201,15 @@ def _status_response(manager, readiness) -> PaperExecutionStatusResponse:
 
 
 def register_paper_execution_routes(app: FastAPI) -> None:
+    @app.get("/api/execution/paper/suggest-window", dependencies=[Depends(require_auth)])
+    async def suggest_paper_window() -> dict[str, str]:
+        """Suggest a regular-session window without authorizing or placing an order."""
+        try:
+            start, end = suggest_paper_entry_window(datetime.now(timezone.utc))
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=503, detail="PAPER trading calendar is unavailable") from exc
+        return {"valid_from": start.isoformat(), "valid_until": end.isoformat()}
+
     @app.get(
         "/api/execution/paper/status",
         response_model=PaperExecutionStatusResponse,
@@ -223,6 +251,251 @@ def register_paper_execution_routes(app: FastAPI) -> None:
                 status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="PAPER strategy candidate catalog is unavailable",
             ) from exc
+
+    @app.post("/api/execution/paper/order-preview")
+    async def preview_paper_order(
+        request: Request,
+        body: PaperOrderPreviewRequest,
+        _principal: Principal = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Check frozen order and historical proof without connecting or authorizing dispatch."""
+        scope = getattr(request.app.state, "paper_execution_scope", None)
+        if not isinstance(scope, PaperRuntimeScope) or scope.broker != "IBKR" or scope.environment.value != "paper":
+            raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail="trusted IBKR PAPER account is not configured")
+        try:
+            prepared = prepare_verified_paper_order(
+                runtime_root=get_runtime_root(), run_id=body.run_id,
+                version_id=body.strategy_version_id, account_ref=scope.account_ref, order=body.order,
+            )
+            if body.setup is not None:
+                body.setup.validate_order(prepared.policy.order)
+        except ValueError as exc:
+            raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail="PAPER order evidence could not be verified") from exc
+        return {
+            "strategy_version_id": prepared.policy.strategy_version_hash,
+            "run_id": prepared.run_id,
+            "order": prepared.policy.order.model_dump(mode="json"),
+            "contract": {
+                "symbol": prepared.contract.symbol, "con_id": prepared.contract.con_id,
+                "security_type": prepared.contract.security_type, "exchange": prepared.contract.exchange,
+                "primary_exchange": prepared.contract.primary_exchange, "currency": prepared.contract.currency,
+            },
+            "backtest_report_sha256": prepared.report_sha256,
+            "data_manifest_hash": prepared.data_manifest_hash,
+            "setup": body.setup.model_dump(mode="json") if body.setup is not None else None,
+            "static_notional_checked": body.setup is not None and prepared.policy.order.order_type == "limit",
+            "live_risk_checked": False,
+            "ready_for_submission": False,
+            "order_submission_performed": False,
+        }
+
+    @app.get("/api/execution/paper/order-draft")
+    async def get_paper_order_draft(request: Request, _principal: Principal = Depends(require_auth)) -> dict[str, Any]:
+        scope = getattr(request.app.state, "paper_execution_scope", None)
+        if not isinstance(scope, PaperRuntimeScope) or scope.broker != "IBKR" or scope.environment.value != "paper":
+            raise HTTPException(status_code=409, detail="trusted IBKR PAPER account is not configured")
+        try:
+            return {"draft": load_paper_order_draft(runtime_root=get_runtime_root(), account_ref=scope.account_ref)}
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="saved PAPER draft or its backtest evidence is unavailable") from exc
+
+    @app.put("/api/execution/paper/order-draft")
+    async def put_paper_order_draft(request: Request, body: PaperOrderPreviewRequest,
+                                    _principal: Principal = Depends(require_auth)) -> dict[str, Any]:
+        scope = getattr(request.app.state, "paper_execution_scope", None)
+        if not isinstance(scope, PaperRuntimeScope) or scope.broker != "IBKR" or scope.environment.value != "paper":
+            raise HTTPException(status_code=409, detail="trusted IBKR PAPER account is not configured")
+        if body.setup is None:
+            raise HTTPException(status_code=422, detail="entry window and risk limits are required")
+        try:
+            draft = save_paper_order_draft(runtime_root=get_runtime_root(), account_ref=scope.account_ref,
+                                           run_id=body.run_id, version_id=body.strategy_version_id,
+                                           order=body.order, setup=body.setup)
+            return {"draft": draft}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="PAPER draft could not be saved") from exc
+
+    @app.post("/api/execution/paper/connect")
+    async def connect_local_paper_gateway(request: Request, principal: Principal = Depends(require_auth)) -> dict[str, Any]:
+        """Discover a single local PAPER account with a read-only connection."""
+        if not isinstance(principal, Principal) or not principal.paper_operator:
+            raise HTTPException(status_code=403, detail="a PAPER operator is required")
+        try:
+            detected = await asyncio.to_thread(discover_local_paper_gateway)
+        except PaperGatewayDiscoveryError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        manager = _manager(request.app)
+        scope = PaperRuntimeScope("IBKR", detected.account, "paper")
+        try:
+            with manager._lock:
+                if manager is not _manager(request.app):
+                    raise PaperExecutionManagerError("PAPER composition changed during discovery")
+                current_scope = getattr(request.app.state, "paper_execution_scope", None)
+                if current_scope is not None and current_scope != scope:
+                    raise PaperExecutionManagerError("the configured PAPER account differs from the detected account")
+                if manager.status() is not None:
+                    if current_scope != scope:
+                        raise PaperExecutionManagerError("active PAPER session has a different account")
+                    return {"verified": True, "environment": "paper", "account_ref": detected.account,
+                            "connection": "Gateway" if detected.port == 4002 else "TWS", "read_only_check": True}
+                from dataclasses import replace
+                from src.execution.order_ledger import SQLiteOrderLedger
+                from src.trading.connectors.ibkr.local import load_config, save_config
+
+                previous = load_config()
+                if (manager.runtime_factory is not None and
+                        (previous.profile != "paper" or previous.readonly is not True
+                         or previous.host != detected.host or previous.port != detected.port
+                         or previous.account != detected.account)):
+                    raise PaperExecutionManagerError("redeploy before changing the PAPER Gateway endpoint")
+                configured = replace(previous, profile="paper", host=detected.host, port=detected.port,
+                                     account=detected.account, readonly=True)
+                if manager.runtime_factory is None:
+                    database = get_runtime_root() / "paper-integration-test" / "execution.sqlite"
+                    database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    manager.bind_stopped_activity(scope, SQLiteOrderLedger(database))
+                save_config(configured)
+                manager._configuration_generation += 1
+                _set_paper_execution_composition(manager, _readiness(request.app), app=request.app, scope=scope)
+        except Exception as exc:
+            raise _management_error(exc) from exc
+        return {"verified": True, "environment": "paper", "account_ref": detected.account,
+                "connection": "Gateway" if detected.port == 4002 else "TWS", "read_only_check": True}
+
+    def _deploy_paper_order_draft(request: Request, principal: Principal) -> dict[str, Any]:
+        """Install a host-built draft composition without starting a broker session."""
+        if not isinstance(principal, Principal) or not principal.paper_operator:
+            raise HTTPException(status_code=403, detail="an attributable operator is required")
+        app = request.app
+        scope = getattr(app.state, "paper_execution_scope", None)
+        factory = getattr(app.state, "paper_draft_composition_factory", None)
+        if not isinstance(scope, PaperRuntimeScope) or not callable(factory):
+            raise HTTPException(status_code=409, detail="PAPER draft deployment is not configured")
+        manager = _manager(app)
+        old_composition = getattr(app.state, "paper_execution_composition", None)
+        old_runner = (getattr(old_composition, "draft_runner", None)
+                      or getattr(old_composition, "integration_test_runner", None))
+        runner_lock = getattr(old_runner, "_lock", None)
+        if old_runner is not None and not callable(getattr(runner_lock, "acquire", None)):
+            raise HTTPException(status_code=409, detail="current PAPER action cannot be safely reconfigured")
+        if runner_lock is not None and not runner_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="a PAPER action is in progress")
+        try:
+            with manager._lock:
+                if manager is not _manager(app) or manager.status() is not None:
+                    raise HTTPException(status_code=409, detail="stop the current PAPER session before deployment")
+                generation = manager._lifecycle_generation
+                configuration_generation = manager._configuration_generation
+                stopped = getattr(manager, "_stopped_activity", None)
+                if stopped is None and old_composition is not None:
+                    raise HTTPException(status_code=409, detail="current PAPER order history is unavailable")
+                if stopped is not None:
+                    old_scope, _ledger = stopped
+                    if old_scope != scope:
+                        raise HTTPException(status_code=409, detail="current PAPER account changed")
+            try:
+                # Replay can take minutes. Build outside the event loop and
+                # manager lock, then recheck all mutable state before install.
+                draft = load_paper_order_draft(runtime_root=get_runtime_root(), account_ref=scope.account_ref)
+                if draft is None:
+                    raise ValueError("no saved PAPER order draft")
+                replacement = factory(scope, principal)
+                if not isinstance(replacement, PaperExecutionComposition) or replacement.scope != scope:
+                    raise ValueError("draft composition scope differs")
+                factory_version = getattr(replacement.manager.runtime_factory, "strategy_version_id", None)
+                builder = getattr(replacement.manager.runtime_factory, "session_builder", None)
+                provider = getattr(builder, "dispatch_risk_facts", None)
+                policy = getattr(provider, "order_policy", None)
+                grant = getattr(provider, "risk_grant", None)
+                setup = PaperOrderSetup.model_validate(draft["setup"])
+                order = ProposedOrder.model_validate(draft["order"])
+                contract = getattr(provider, "contracts", {}).get(order.instrument_id)
+                if (factory_version != draft["strategy_version_id"] or policy is None or grant is None
+                        or policy.account_ref != scope.account_ref
+                        or policy.strategy_version_hash != draft["strategy_version_id"] or policy.order != order
+                        or contract is None or contract.con_id != draft["contract_id"]
+                        or grant.account_ref != scope.account_ref
+                        or grant.strategy_version_hash != draft["strategy_version_id"]
+                        or grant.environment != scope.environment or grant.broker != scope.broker
+                        or grant.allowed_instruments != (order.instrument_id,)
+                        or grant.allowed_order_types != (order.order_type,)
+                        or grant.max_order_notional != setup.max_order_notional
+                        or grant.max_gross_exposure != setup.max_gross_exposure
+                        or grant.strategy_budget != setup.strategy_budget
+                        or grant.max_daily_loss != setup.max_daily_loss
+                        or grant.max_orders_per_session != setup.max_orders_per_session
+                        or grant.valid_from != setup.valid_from or grant.valid_until != setup.valid_until):
+                    raise ValueError("draft composition differs from saved order or limits")
+                with manager._lock:
+                    if (manager is not _manager(app) or manager.status() is not None
+                            or manager._lifecycle_generation != generation
+                            or manager._configuration_generation != configuration_generation
+                            or getattr(app.state, "paper_execution_scope", None) != scope
+                            or getattr(app.state, "paper_execution_composition", None) is not old_composition):
+                        raise ValueError("PAPER runtime changed during deployment")
+                    if load_paper_order_draft(runtime_root=get_runtime_root(), account_ref=scope.account_ref) != draft:
+                        raise ValueError("PAPER draft changed during deployment")
+                    stopped_now = getattr(manager, "_stopped_activity", None)
+                    if stopped_now != stopped:
+                        raise ValueError("PAPER order history changed during deployment")
+                    new_stopped = getattr(replacement.manager, "_stopped_activity", None)
+                    if new_stopped is None or new_stopped[0] != scope:
+                        raise ValueError("draft composition has no PAPER history reader")
+                    if stopped is not None and Path(new_stopped[1].path).resolve() != Path(stopped[1].path).resolve():
+                        raise ValueError("draft composition must preserve the existing PAPER ledger")
+                    ledger = new_stopped[1]
+                    recovery = ledger.recovery_snapshot_for_scope(
+                        broker=scope.broker, account_ref=scope.account_ref, environment=scope.environment,
+                    )
+                    if any((recovery.ready_to_reserve, recovery.ready_to_send, recovery.unresolved_sends)):
+                        raise ValueError("unresolved PAPER orders prevent deployment recovery")
+                    deployment_id = getattr(builder, "deployment_id", None)
+                    if recovery.active_orders and not isinstance(deployment_id, str):
+                        raise ValueError("working orders require an exact PAPER deployment")
+                    for active_order in recovery.active_orders:
+                        intent = ledger.get_intent(active_order.intent_id)
+                        if intent.deployment_id != deployment_id or intent.strategy_version_hash != factory_version:
+                            raise ValueError("working orders belong to another PAPER deployment")
+                    _set_paper_execution_composition(replacement.manager, replacement.readiness, app=app, scope=scope)
+                    app.state.paper_execution_composition = replacement
+            except Exception as exc:
+                if isinstance(exc, HTTPException):
+                    raise
+                raise HTTPException(status_code=409, detail="PAPER draft deployment could not be installed") from exc
+            return {"strategy_version_id": draft["strategy_version_id"], "run_id": draft["run_id"],
+                    "order_submission_performed": False, "session_started": False,
+                    "matching_working_orders": len(recovery.active_orders)}
+        finally:
+            if runner_lock is not None:
+                runner_lock.release()
+
+    @app.post("/api/execution/paper/order-draft/deploy")
+    async def deploy_paper_order_draft(request: Request, principal: Principal = Depends(require_auth)) -> dict[str, Any]:
+        return await asyncio.to_thread(_deploy_paper_order_draft, request, principal)
+
+    @app.post("/api/execution/paper/order-draft/run")
+    async def run_paper_order_draft(request: Request, principal: Principal = Depends(require_auth)) -> dict[str, Any]:
+        """Start the installed draft and enqueue its verified initial signal bar."""
+        composition = getattr(request.app.state, "paper_execution_composition", None)
+        runner = getattr(composition, "draft_runner", None)
+        if not callable(runner):
+            raise HTTPException(status_code=409, detail="deploy a PAPER draft before starting it")
+        try:
+            return await asyncio.to_thread(
+                runner, principal,
+                is_current=lambda: (getattr(request.app.state, "paper_execution_composition", None) is composition
+                                    and _manager(request.app) is composition.manager),
+            )
+        except (PaperRuntimeAuthorizationError, PaperExecutionManagerError) as exc:
+            raise _management_error(exc) from exc
+        except PaperDraftRunError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail="PAPER draft could not be started") from exc
 
     @app.post("/api/execution/paper/strategy-candidates/select")
     async def select_paper_strategy_candidate(
@@ -276,6 +549,7 @@ def register_paper_execution_routes(app: FastAPI) -> None:
                     receipt = prepare_paper_strategy_selection(
                         body.strategy_version_id,
                         operator_subject=principal.subject,
+                        run_id=body.run_id,
                     )
                     from src.execution.paper_integration_test_composition import (
                         build_paper_integration_test_composition,
@@ -452,6 +726,25 @@ def register_paper_execution_routes(app: FastAPI) -> None:
             raise _management_error(exc) from exc
         return _status_response(manager, readiness)
 
+    @app.post("/api/execution/paper/cancel-recovery/start", response_model=PaperExecutionStatusResponse)
+    async def start_paper_cancel_recovery(
+        request: Request, principal: Principal = Depends(require_auth),
+    ) -> PaperExecutionStatusResponse:
+        """Reconnect the pinned deployment PAUSED to manage its known working orders."""
+        manager = _manager(request.app)
+        readiness = _readiness(request.app)
+        scope = getattr(request.app.state, "paper_execution_scope", None)
+        if not isinstance(scope, PaperRuntimeScope):
+            raise HTTPException(status_code=409, detail="trusted PAPER runtime scope is not configured")
+        try:
+            with manager._lock:
+                if manager is not _manager(request.app):
+                    raise PaperExecutionManagerError("PAPER composition changed before recovery")
+                manager.start_for_cancel_recovery(scope, principal)
+        except Exception as exc:
+            raise _management_error(exc) from exc
+        return _status_response(manager, readiness)
+
     @app.post("/api/execution/paper/integration-test/run")
     async def run_paper_integration_test(
         request: Request,
@@ -535,6 +828,10 @@ def register_paper_execution_routes(app: FastAPI) -> None:
         manager = _manager(request.app)
         readiness = _readiness(request.app)
         scope = _active_scope(manager)
+        composition = getattr(request.app.state, "paper_execution_composition", None)
+        if getattr(composition, "manager", None) is manager and getattr(composition, "draft_runner", None) is not None:
+            raise HTTPException(status_code=409, detail={"code": "paper_draft_requires_restart",
+                "message": "Stop the paused draft session and prepare a fresh backtest before starting again"})
         try:
             manager.activate(scope, principal)
         except Exception as exc:

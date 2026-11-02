@@ -115,6 +115,10 @@ $requirementsLock = Join-Path $electronRoot 'requirements-windows-lock.txt'
 if (-not (Test-Path -LiteralPath $requirementsLock)) {
     throw 'desktop/electron/requirements-windows-lock.txt is missing. Windows packaging requires its platform-specific hash-locked dependencies.'
 }
+$paperRequirementsLock = Join-Path $electronRoot 'requirements-paper-windows-lock.txt'
+if (-not (Test-Path -LiteralPath $paperRequirementsLock)) {
+    throw 'The hash-locked Windows PAPER dependencies are missing.'
+}
 
 $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
 if (-not (Test-Path -LiteralPath $curl)) {
@@ -125,6 +129,14 @@ Get-VerifiedDownload `
     -DestinationPath $archivePath `
     -ExpectedSha256 $expectedSha256 `
     -Label 'Python embeddable package' `
+    -CurlPath $curl
+
+$wasiArchive = Join-Path $cacheRoot 'python-3.12.0-wasi-sdk-20.0.tar.gz'
+Get-VerifiedDownload `
+    -Uri 'https://github.com/vmware-labs/webassembly-language-runtimes/releases/download/python/3.12.0%2B20231211-040d5a6/python-3.12.0-wasi-sdk-20.0.tar.gz' `
+    -DestinationPath $wasiArchive `
+    -ExpectedSha256 '6c1cddbb69ae09e87eee2906bdc70539bff5f2969818a6f8457d4e6a6eb67d4d' `
+    -Label 'WASI Python runtime' `
     -CurlPath $curl
 
 if ($Clean -and (Test-Path -LiteralPath $runtimeRoot)) {
@@ -138,6 +150,28 @@ if ($Clean -and (Test-Path -LiteralPath $runtimeRoot)) {
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 Expand-Archive -LiteralPath $archivePath -DestinationPath $runtimeRoot -Force
+
+# The guest can read only its standard-library zip. The worker source is
+# passed as trusted code to the WASI instance, not mounted from user folders.
+$wasiTemp = Join-Path $cacheRoot ("wasi-extract-{0}" -f [Guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $wasiTemp -Force | Out-Null
+    & tar.exe -xzf $wasiArchive -C $wasiTemp 'bin/python-3.12.0.wasm' 'usr/local/lib/python312.zip'
+    if ($LASTEXITCODE -ne 0) { throw 'WASI runtime extraction failed.' }
+    $wasiBinary = Join-Path $wasiTemp 'bin\python-3.12.0.wasm'
+    $wasiStdlib = Join-Path $wasiTemp 'usr\local\lib\python312.zip'
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $wasiBinary).Hash.ToLowerInvariant() -ne '5ce0cbeb843e6e5abf2d50c7158002e8333c26a40fbe27a7a52e66ee48cf64a8' -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $wasiStdlib).Hash.ToLowerInvariant() -ne '74130c400ba5b818bf58bfc2f41fc075f4350cbb13e53099c84e9c0494ec5444') {
+        throw 'WASI runtime component hash mismatch.'
+    }
+    $wasiRuntime = Join-Path $runtimeRoot 'wasi-runtime'
+    New-Item -ItemType Directory -Path (Join-Path $wasiRuntime 'stdlib') -Force | Out-Null
+    Copy-Item -LiteralPath $wasiBinary -Destination (Join-Path $wasiRuntime 'python.wasm') -Force
+    Copy-Item -LiteralPath $wasiStdlib -Destination (Join-Path $wasiRuntime 'stdlib\python312.zip') -Force
+    Copy-Item -LiteralPath (Join-Path $electronRoot 'licenses\CPYTHON-3.12.0-LICENSE.txt') -Destination $wasiRuntime -Force
+    Copy-Item -LiteralPath (Join-Path $electronRoot 'licenses\WASI-RUNTIMES-APACHE-2.0.txt') -Destination $wasiRuntime -Force
+}
+finally { Remove-Item -LiteralPath $wasiTemp -Recurse -Force -ErrorAction SilentlyContinue }
 
 $pthPath = Join-Path $runtimeRoot 'python312._pth'
 $pthContent = @(
@@ -193,6 +227,19 @@ foreach ($artifact in $packagingArtifacts) {
     --requirement $requirementsLock
 if ($LASTEXITCODE -ne 0) {
     throw 'Installing hash-locked base dependencies into the embedded runtime failed.'
+}
+
+# This lock was resolved against the base lock. --no-deps prevents replacing
+# the existing base packages while --require-hashes fixes the added wheels.
+& $BuildPython -m pip install `
+    --disable-pip-version-check `
+    --require-hashes `
+    --only-binary=:all: `
+    --no-deps `
+    --target $sitePackages `
+    --requirement $paperRequirementsLock
+if ($LASTEXITCODE -ne 0) {
+    throw 'Installing hash-locked PAPER dependencies into the embedded runtime failed.'
 }
 
 # Install only this checked-out project after its dependency closure has been
@@ -348,6 +395,38 @@ if ($LASTEXITCODE -ne 0) {
     throw 'The embedded runtime does not satisfy the checked-out project dependency metadata.'
 }
 
+$wasiSmoke = @'
+import os
+import sys
+from pathlib import Path
+from src.execution.wasi_python_sandbox import WasiPythonSandbox
+
+os.environ["VIBE_WASI_PACKAGING_SENTINEL"] = "host-only"
+source = '''import os
+def on_event(event, state):
+    result = {"env": os.environ.get("VIBE_WASI_PACKAGING_SENTINEL")}
+    try:
+        open("/usr/local/lib/write-probe", "w").write("x")
+        result["write"] = True
+    except Exception:
+        result["write"] = False
+    try:
+        import socket
+        socket.socket()
+        result["socket"] = True
+    except Exception:
+        result["socket"] = False
+    return {"state": result, "order_proposals": []}
+'''
+sandbox = WasiPythonSandbox(Path(sys.executable).parent / "wasi-runtime")
+result = sandbox.run_json({"op": "strategy_event", "protocol_version": 1, "request_id": "a" * 32,
+    "event_id": "packaging-smoke", "source": source, "event": {"bar": {}}, "state": {}}).response
+assert result["state"] == {"env": None, "write": False, "socket": False}
+print("WASI isolated worker smoke: OK")
+'@
+$wasiSmoke | & $runtimePython -
+if ($LASTEXITCODE -ne 0) { throw 'The embedded WASI worker smoke test failed.' }
+
 & {
     $gtkBin = Join-Path $runtimeRoot 'gtk\bin'
     $previousPath = $env:PATH
@@ -359,8 +438,14 @@ if ($LASTEXITCODE -ne 0) {
 import importlib.util
 import api_server
 import cli
+import backtrader
+import exchange_calendars
+import ib_async
 from weasyprint import HTML
 
+assert backtrader.__version__ == "1.9.78.123"
+assert exchange_calendars.__version__ == "4.13.2"
+assert ib_async.__version__ == "2.0.1"
 assert len(HTML(string="<p>PDF smoke</p>").write_pdf()) > 1000
 for optional_module in (
     "dingtalk_stream",

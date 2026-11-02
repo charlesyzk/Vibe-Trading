@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -43,14 +44,28 @@ from src.trading.connectors.ibkr.local import load_config
 _CLIENT_ID = 6138
 
 
+def _ibkr_runtime_paths(*, backend_python: Path, repository_root: Path, windows: bool) -> tuple[Path, Path]:
+    """Resolve the isolated runtime beside a packaged backend or in a checkout."""
+    bundled = backend_python.parent / "ibkr-runtime"
+    if bundled.exists():
+        return bundled / ("python.exe" if windows else "python"), bundled
+    project = repository_root / "ibkr-runtime"
+    python = project / ".venv" / ("Scripts" if windows else "bin") / ("python.exe" if windows else "python")
+    return python, project
+
+
 class PaperSignalSessionMismatch(RuntimeError):
     """The frozen backtest signal is no longer the latest completed session."""
 
 
 def _require_fixed_order_backtest(root: Path, version):
+    config = read_paper_integration_test_config(root / "paper-integration-test.json")
+    if config.strategy_version_id != version.version_id:
+        raise RuntimeError("PAPER backtest strategy differs from configured deployment")
     evidence = verify_paper_backtest_attestation(
         root / "paper-integration-test" / "backtests",
         version=version,
+        report_sha256=config.backtest_report_sha256,
     )
     report = json.loads(evidence.report_path.read_text(encoding="utf-8"))
     # The dedicated report was fetched and attested by this trusted local
@@ -234,8 +249,10 @@ def build_paper_integration_test_composition() -> PaperExecutionComposition:
     runtime_home.chmod(0o700)
     database_path = runtime_home / "execution.sqlite"
     lock_directory = runtime_home / "owner-lock"
-    runtime_project = Path(__file__).resolve().parents[3] / "ibkr-runtime"
-    runtime_python = runtime_project / ".venv" / "bin" / "python"
+    runtime_python, runtime_project = _ibkr_runtime_paths(
+        backend_python=Path(sys.executable), repository_root=Path(__file__).resolve().parents[3],
+        windows=os.name == "nt",
+    )
     runtime_config = IbkrPaperRuntimeConfig(
         python=runtime_python,
         runtime_cwd=runtime_project,

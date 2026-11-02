@@ -503,10 +503,12 @@ class IbkrManagedPaperRuntime:
         """Durably request cancel without depending on the strategy thread."""
         with self._lock:
             state, _reason = self.service.state()
-            if state not in {ExecutionControlState.RUNNING, ExecutionControlState.PAUSED}:
-                raise ManagedRuntimeError("owned-order cancellation requires a running or paused runtime")
+            if state not in {ExecutionControlState.RUNNING, ExecutionControlState.PAUSED, ExecutionControlState.STOPPING}:
+                raise ManagedRuntimeError("owned-order cancellation requires a running, paused, or stopping runtime")
             if not self.service.lease_held or self._process_closed:
                 raise ManagedRuntimeError("owned-order cancellation requires the active runtime lease")
+            if not self.callback_worker.alive or self.callback_worker.failure is not None:
+                raise ManagedRuntimeError("owned-order cancellation requires a healthy callback consumer")
             intent = self.ledger.get_intent(intent_id)
             if (
                 intent.broker != "IBKR"
@@ -664,7 +666,7 @@ class IbkrManagedPaperRuntime:
                 deadline = time.monotonic() + self.stop_timeout
                 while time.monotonic() < deadline:
                     self._raise_worker_failure()
-                    if not self.order_index.pending_callbacks():
+                    if not self.order_index.pending_callbacks() and not self.order_index.pending_inbox():
                         break
                     time.sleep(self.poll_interval)
                 if self.order_index.pending_callbacks() or self.order_index.pending_inbox():

@@ -78,6 +78,18 @@ def test_source_drops_current_incomplete_session(monkeypatch):
     assert [bar.session_date for bar in bars] == [date(2026, 10, 28), date(2026, 10, 29)]
 
 
+def test_completed_bar_requires_exact_instrument_and_completed_session(monkeypatch):
+    from src.trading.connectors.ibkr import local
+
+    monkeypatch.setattr(local, "get_historical_bars", lambda *_args, **_kwargs: _response())
+    source = _source(datetime(2026, 10, 30, 18, tzinfo=timezone.utc))
+    assert source.completed_bar("AAPL", date(2026, 10, 29)).close == Decimal("101")
+    with pytest.raises(IbkrCompletedBarSourceError, match="unavailable"):
+        source.completed_bar("AAPL", date(2026, 10, 30))
+    with pytest.raises(IbkrCompletedBarSourceError, match="differs"):
+        source.completed_bar("MSFT", date(2026, 10, 29))
+
+
 def test_source_publishes_only_to_the_matching_bounded_paper_feed(monkeypatch):
     from src.trading.connectors.ibkr import local
 
@@ -105,6 +117,30 @@ def test_incremental_source_rejects_missing_completed_xnys_session(monkeypatch):
     monkeypatch.setattr(local, "get_historical_bars", lambda *_args, **_kwargs: _response(("2026-10-28", "2026-10-30")))
     with pytest.raises(IbkrCompletedBarSourceError, match="missing one or more"):
         _source(datetime(2026, 10, 31, 15, tzinfo=timezone.utc))(after_session=date(2026, 10, 28))
+
+
+@pytest.mark.parametrize("dates", [("2026-10-28", "2026-10-29"), ("2026-10-28",)])
+def test_incremental_source_rejects_missing_latest_or_all_new_sessions(monkeypatch, dates):
+    from src.trading.connectors.ibkr import local
+
+    monkeypatch.setattr(local, "get_historical_bars", lambda *_args, **_kwargs: _response(dates))
+    with pytest.raises(IbkrCompletedBarSourceError, match="missing one or more"):
+        _source(datetime(2026, 10, 31, 15, tzinfo=timezone.utc))(after_session=date(2026, 10, 28))
+
+
+def test_incremental_source_accepts_no_new_closed_session(monkeypatch):
+    from src.trading.connectors.ibkr import local
+
+    monkeypatch.setattr(local, "get_historical_bars", lambda *_args, **_kwargs: _response())
+    assert _source(datetime(2026, 10, 30, 18, tzinfo=timezone.utc))(after_session=date(2026, 10, 29)) == ()
+
+
+def test_incremental_source_rejects_future_cursor(monkeypatch):
+    from src.trading.connectors.ibkr import local
+
+    monkeypatch.setattr(local, "get_historical_bars", lambda *_args, **_kwargs: _response())
+    with pytest.raises(IbkrCompletedBarSourceError, match="future"):
+        _source(datetime(2026, 10, 30, 18, tzinfo=timezone.utc))(after_session=date(2026, 10, 31))
 
 
 def test_source_rejects_contract_mismatch(monkeypatch):

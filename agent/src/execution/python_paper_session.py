@@ -41,22 +41,26 @@ class PythonPaperSessionError(RuntimeError):
 class _SessionStrategy(bt.Strategy):
     """Trusted BT shell that forwards exact current Bars to the host bridge."""
 
-    params = (("bridge", None), ("initial_last_bar_end", None))
+    params = (("bridge", None), ("initial_last_bar_end", None), ("initial_last_bar", None))
 
     def __init__(self) -> None:
         self.results: list[Any] = []
-        self._last_bar_end = self.p.initial_last_bar_end
+        self._last_bar = self.p.initial_last_bar
+        self._last_bar_end = self._last_bar.end_at if self._last_bar is not None else self.p.initial_last_bar_end
 
     def next(self) -> None:
         bar = getattr(self.data, "current_completed_bar", None)
         if bar is None:
             raise PythonPaperSessionError("Backtrader feed has no trusted current completed bar")
         if bar.end_at == self._last_bar_end:
+            if self._last_bar is not None and bar != self._last_bar:
+                raise PythonPaperSessionError("completed bar differs from the committed bar at the same time")
             return
         if self._last_bar_end is not None and bar.end_at < self._last_bar_end:
             raise PythonPaperSessionError("completed bar time moved backwards")
         result = self.p.bridge.process_completed_bar(self, self.data, bar)
         self.results.append(result)
+        self._last_bar = bar
         self._last_bar_end = bar.end_at
 
 

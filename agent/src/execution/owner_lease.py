@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from src.execution.contracts import Environment
+from src.execution import local_file_lock
 
 
 class ExecutionOwnerUnavailable(RuntimeError):
@@ -49,15 +49,18 @@ class ExecutionOwnerLease:
         self.path = root / ("execution-owner-" + hashlib.sha256(scope).hexdigest() + ".lock")
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(self.path, flags, 0o600)
-        os.fchmod(descriptor, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
         self._file = os.fdopen(descriptor, "r+b")
         try:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            local_file_lock.acquire(self._file)
+        except OSError as exc:
             self._file.close()
-            raise ExecutionOwnerUnavailable(
-                "another local process owns this broker/account/environment"
-            ) from exc
+            if isinstance(exc, BlockingIOError):
+                raise ExecutionOwnerUnavailable(
+                    "another local process owns this broker/account/environment"
+                ) from exc
+            raise
         metadata: dict[str, Any] = {
             "broker": self.broker,
             "account_ref": self.account_ref,
@@ -88,8 +91,10 @@ class ExecutionOwnerLease:
 
     def close(self) -> None:
         if not self._file.closed:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
-            self._file.close()
+            try:
+                local_file_lock.release(self._file)
+            finally:
+                self._file.close()
 
     def __enter__(self) -> "ExecutionOwnerLease":
         return self

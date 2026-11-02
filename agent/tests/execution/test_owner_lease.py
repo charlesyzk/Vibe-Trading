@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,7 @@ def test_owner_lease_rejects_a_different_account_scope(tmp_path):
         lease.close()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows permissions use inherited ACLs, not POSIX mode bits")
 def test_owner_metadata_files_are_private_to_the_user(tmp_path):
     lease = ExecutionOwnerLease(
         lock_directory=tmp_path / "private-locks", broker="IBKR", account_ref="paper-1",

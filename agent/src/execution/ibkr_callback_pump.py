@@ -32,6 +32,7 @@ from src.execution.contracts import Environment, canonical_json
 from src.execution.order_ledger import (
     BrokerEvent,
     BrokerEventKind,
+    InvalidTransition,
     LedgerConflict,
     LocalOrderState,
     SQLiteOrderLedger,
@@ -628,6 +629,32 @@ class IbkrCallbackPump:
                     occurred_at=now,
                     received_at=now,
                     broker_order_id=str(order_id),
+                )
+            if error_code == 202:
+                # IBKR documents 202 as an order-cancellation notification.
+                # It carries no cumulative fill facts, so it must not itself
+                # confirm cancellation or release a reservation.  Acknowledge
+                # only an exact owned order and let its subsequent orderStatus
+                # callback establish the durable cancellation state.
+                order_id = _as_int(payload, "request_id")
+                binding = self.order_index.resolve(order_id)
+                self._check_scope(binding)
+                return None
+            if error_code == 10148:
+                # IBKR documents this as a cancel against an already-filled
+                # order. The error alone is not an execution report and may
+                # race with fills, so preserve uncertainty and reconcile.
+                order_id = _as_int(payload, "request_id")
+                binding = self.order_index.resolve(order_id)
+                self._check_scope(binding)
+                try:
+                    self.ledger.mark_cancel_unknown(binding.intent_id)
+                except InvalidTransition:
+                    # There may be no local cancel, or its result may already
+                    # be terminal. Neither case authorizes changing that fact.
+                    pass
+                raise CallbackPumpFatal(
+                    "IBKR cancel could not be completed; order and fills require reconciliation"
                 )
             if error_code in _IBKR_CONNECTIVITY_CODES:
                 raise CallbackPumpFatal(

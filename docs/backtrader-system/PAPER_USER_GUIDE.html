@@ -52,129 +52,75 @@
     <header>
       <div class="eyebrow">Vibe-Trading · 操作手册</div>
       <h1>IBKR PAPER 策略验证</h1>
-      <p>从 Python 策略冻结、Backtrader 回测，到选择 PAPER 版本、连接 Gateway、观察订单回报和核对持仓。策略选择和回测不会下单；真实模拟盘动作由操作员在应用里单独触发。</p>
-      <div class="chips"><span class="chip">一个共享 PAPER 账户</span><span class="chip">AAPL · BUY 1</span><span class="chip">LMT $400 · DAY · RTH</span><span class="chip">LIVE 禁用</span></div>
+      <p>使用冻结策略和回测证据创建模拟盘草稿，选择受支持的标的、数量和风险上限。仅支持 PAPER；LIVE 下单已禁用。</p>
+      <div class="chips"><span class="chip">模拟账户 PAPER</span><span class="chip">每份草稿一个标的</span><span class="chip">LIVE 禁用</span></div>
     </header>
-
-    <nav aria-label="目录">
-      <a href="#overview">流程总览</a><a href="#before">开始前</a><a href="#strategy">创建与回测</a><a href="#select">选择版本</a><a href="#trade">PAPER 验证</a><a href="#results">怎么看结果</a><a href="#troubleshoot">故障排查</a>
-    </nav>
-
-    <section id="overview">
-      <h2>流程总览</h2>
-      <div class="flow" aria-label="策略验证流程">
-        <span class="node">上传 Python</span><span class="arrow">→</span><span class="node">IBKR PAPER 拉取日线</span><span class="arrow">→</span><span class="node">冻结并回测</span><span class="arrow">→</span><span class="node">候选校验</span><span class="arrow">→</span><span class="node">选择部署</span><span class="arrow">→</span><span class="node">单笔 PAPER</span><span class="arrow">→</span><span class="node">回报与持仓对账</span>
-      </div>
-      <div class="steps">
-        <div class="step"><b>1 · 策略和行情先冻结</b>回测使用的源码、订单参数、行情 CSV、交易日程和报告会绑定到一个不可变版本。</div>
-        <div class="step"><b>2 · 候选需要证据匹配</b>报告必须证明当前授权的固定单笔形状，并带有服务器签发的 IBKR PAPER 行情导入凭证。</div>
-        <div class="step"><b>3 · 选择部署不下单</b>版本选择需要 PAPER 已停止且订单账本为空；选择后只更新部署绑定并记审计。</div>
-        <div class="step"><b>4 · PAPER 动作单独触发</b>运行按钮连接 Gateway、对账后派出至多一笔受限订单，随后暂停派单并刷新 IBKR 账户快照。</div>
-      </div>
+    <nav aria-label="目录"><a href="#quick">第一次使用</a><a href="#before">开始前</a><a href="#strategy">策略与回测</a><a href="#deploy">草稿与部署</a><a href="#orders">订单与撤单</a><a href="#troubleshoot">故障排查</a></nav>
+    <section id="quick">
+      <h2>第一次使用：按这个顺序操作</h2>
+      <div class="flow"><span class="node">安装并打开应用</span><span class="arrow">→</span><span class="node">登录 Gateway 模拟账户</span><span class="arrow">→</span><span class="node">上传策略并回测</span><span class="arrow">→</span><span class="node">保存并部署草稿</span><span class="arrow">→</span><span class="node">启动并查看订单</span></div>
+      <p>准备好 Windows 电脑、IBKR 模拟账户和策略 <code>.py</code> 文件。首次可在应用中点击<strong>下载 Python 回调模板</strong>查看支持的策略格式。应用无需另装 Python 或 Docker；IB Gateway 或 TWS 需单独安装。</p>
+      <p>下面以选择 AAPL、2 股为例说明填写方式，实际可根据需要换成其他受支持的股票代码和整股数量。每份草稿只绑定一个标的；要分别使用 MSFT 等其他标的，请为它重新获取行情、回测并建立草稿。示例不保证某个合约、行情或订单一定符合条件。</p>
+      <div class="callout info">本手册随安装包提供，也可作为独立 HTML 文件在浏览器打开。页面上的 <strong>Execution</strong> 是策略与模拟盘操作页面；<strong>PAPER</strong> 表示模拟账户。</div>
     </section>
-
     <section id="before">
-      <h2>开始前检查</h2>
-      <ul>
-        <li>启动 IB Gateway 或 TWS，并登录同一个 <strong>Paper</strong> 账户。默认 Gateway 端口为 <code>4002</code>，TWS Paper 端口为 <code>7497</code>。</li>
-        <li>应用的 IBKR 本地配置必须是 PAPER、只读连接配置且账户/端口与本机 Gateway 一致。</li>
-        <li>隔离 Python worker 镜像需已配置；否则上传策略可以校验，但无法执行回测。</li>
-        <li>每位操作员使用具名 operator token；共享 Gateway 账户不等于共享个人授权。管理员按需要发放本次时段内的动作 grants。</li>
-      </ul>
-      <div class="callout info"><strong>当前固定联调配置：</strong>AAPL BUY 1 股，限价 $400.00，DAY，只允许常规交易时段；最大名义金额 $400，最多一笔。当前有效窗口为 <code>2026-11-02 14:30–21:00 UTC</code>。窗口外按钮会保持关闭。</div>
-      <h3>操作员凭证</h3>
-      <p>凭证由可信应用主机上的管理员创建并通过团队的安全渠道交给对应人员。不要把 token 粘贴到策略文件、截图或手册中。</p>
-      <p>在应用中打开<strong>设置 → 本地 API 访问</strong>，将自己的 operator token 填入<strong>服务器 API 密钥</strong>并点击保存。页面会刷新；此凭证保存在当前浏览器中。选择 PAPER 策略和控制运行时，即使访问 localhost 也需要具名 token。</p>
-      <p>管理员可在项目根目录运行以下命令创建操作员 token：</p>
-      <pre>uv run --project agent python -m src.execution.paper_operator_tokens issue --subject partner-name</pre>
-      <p>Grant 需绑定操作员、共享 DU Paper 账户、动作名称和有效时间。<code>start</code>、<code>activate</code>、<code>stop</code> 等动作分别授权。现行单笔按钮会按运行需要校验对应授权。</p>
+      <h2>开始前</h2>
+      <div class="callout warn"><strong>请注意：</strong>Windows 的安装、启动和同版本重装已经测试；实际 Gateway 模拟账户连接以及真实模拟订单回报仍需在使用环境中验证。请持续查看会话和订单状态。</div>
+      <ol>
+        <li>双击 Windows 安装程序，按提示选择安装位置并完成安装，然后从桌面或开始菜单打开应用。IB Gateway 或 TWS 需要单独安装；启动后选择并登录所需的 Paper 模拟账户。</li>
+        <li>在 Gateway/TWS 的 API 设置中启用 Socket Clients；如需后续提交或撤销模拟委托，还需关闭 Gateway 的 Read-Only API 选项。保持登录的是 Paper 模拟账户。打开应用的 Execution 页面，等待自动检查，或点击<strong>检查 PAPER Gateway 连接</strong>。成功后页面显示已核验的模拟账户。只读检查不表示策略已启动。</li>
+        <li>如果同时发现多个账户或多个本机 PAPER 端点，先只保留需要使用的一个，再重试。桌面版通用草稿自动使用本机操作员配置，不需要手工复制 token。</li>
+      </ol>
+      <p>Windows 验证安装包内置应用运行环境和隔离策略 worker，无需自行安装 Python 或 Docker；已在 Windows 测试干净安装、启动和同版本重装。真实 Gateway 连接及完整伙伴流程仍待验收。IB Gateway 需要另行安装和登录。自动识别使用 Gateway 或 TWS 的默认 PAPER API 设置；如果改过默认连接设置，请在 Gateway/TWS 恢复默认后重试。</p>
     </section>
-
     <section id="strategy">
-      <h2>创建、冻结并回测策略</h2>
+      <h2>创建、冻结并回测</h2>
       <ol>
-        <li>打开应用的 <strong>Execution</strong> 页面，在 Python 上传区域下载<strong>单笔 PAPER 联调示例</strong>。打开文件，将其中的 <code>2026-10-30</code> 改为本次单日评估日期，然后保存并上传。通用回调模板默认不发订单，需自行编写规则。策略入口是 <code>on_event(event, state)</code>；上传代码在隔离 worker 中按已完成 bar 执行。</li>
-        <li>当前部署包络保持：策略 ID 自选；标的和 instrument 都填 <code>AAPL</code>；股数填 <code>1</code>；订单类型选 <code>LIMIT · DAY</code>；限价填 <code>400.00</code>。</li>
-        <li>设置暖机和评估日期。固定单笔候选的评估区间必须只有一个 XNYS 交易日，且该日必须是执行时 IBKR 返回的<strong>最新完整交易日</strong>；数据需包含完整 RTH 日线和精确交易日程。当前 2026-11-02 的常规时段窗口内，预期评估日为 2026-10-30；实际仍以 Gateway 返回的数据为准。</li>
-        <li>已有已选 PAPER 报告时，可点击<strong>使用当前 PAPER 回测日期</strong>，填入报告评估日和其前一个交易日。该按钮使用的是已选报告日期；如果最新完整交易日已变化，请手动调整并重新拉取日线。</li>
-        <li>点击 <strong>Fetch daily bars from IBKR</strong>，使用 <strong>IBKR PAPER</strong> 和当前本机端口。页面会自动填入 CSV 与交易时段 JSON。成功后会显示服务器验证的 PAPER 来源凭证。</li>
-        <li>上传 Python 文件，点击 <strong>Validate and review upload</strong>。确认卡检查来源凭证、标的、数量、订单类型、限价、日期、bar 数和各项 SHA-256。</li>
-        <li>确认无误后点击 <strong>Confirm and run Backtrader</strong>。这一步只运行离线回测，不连接 Gateway、不发订单。成功结果会保存一份 immutable strategy version 和可复核报告。</li>
+        <li>打开 <strong>Execution</strong>，找到<strong>运行隔离的 Python 上传策略</strong>。在“策略 .py 文件”选择策略文件；需要示例格式时先点击<strong>下载 Python 回调模板</strong>。</li>
+        <li>填写“IBKR 代码”（例如 AAPL）、“明确整股数量”（例如 2）、“回测订单类型”。选择 LIMIT 时还要填写“限价（USD）”；MARKET 是市价单。按策略要求填写其他参数，检查日期、初始现金和成本假设。</li>
+        <li>登录模拟账户后点击<strong>从 IBKR 获取日线</strong>，等待显示日线已载入和服务端 PAPER 来源凭证。应用会同时准备所需交易日程；仅手工填写来源标签或上传文件，不会自动取得可用于 PAPER 部署的来源凭证。</li>
+        <li>点击<strong>校验并预览上传内容</strong>，仔细核对标的、股数、订单类型、限价、日期与数据。需要更改时点击<strong>修改上传内容</strong>；无误后点击<strong>确认并运行 Backtrader</strong>。</li>
+        <li>等待“已保存 Python Backtrader 报告”，查看报告。回测不会提交券商订单；保存的策略版本、参数、行情和报告会绑定在一起。修改标的、数量或订单规则后，请重新获取对应行情并回测。</li>
       </ol>
-      <div class="callout warn"><strong>不要手工改来源标签来绕过校验。</strong>从 CSV 上传或手写 provider 标签可以用于普通离线研究，但不会获得 PAPER 来源凭证。服务器的一次性凭证绑定当次 PAPER 拉取的精确 CSV 和 XNYS 交易日程；修改行情后需重新拉取。</div>
-      <h3>策略要满足的候选条件</h3>
-      <ul>
-        <li>Python upload、AAPL、long-only 显式 1 股、完整日线、XNYS regular session。</li>
-        <li>策略在评估日产生且只产生一笔 BUY 1、LIMIT $400、DAY、RTH-only 订单。</li>
-        <li>离线回测到数据末尾仍未成交；报告中应为未成交订单且没有 fill。</li>
-        <li>Backtrader 报告回放完整性 verified，报告、冻结版本和服务器验证的 PAPER 行情摘要彼此匹配。</li>
-      </ul>
+      <p>并非所有标的、数量或订单都可使用。合约、行情权限、交易时段、账户事实和风险上限不满足时，页面或服务端会给出阻止原因。旧的 AAPL BUY 1、$400 限价单是单独的固定联调入口，不是通用草稿的标的限制。</p>
     </section>
-
-    <section id="select">
-      <h2>选择 PAPER 版本</h2>
+    <section id="deploy">
+      <h2>核对草稿并启动</h2>
       <ol>
-        <li>在 Execution 页的 <strong>Frozen Backtest Versions</strong> 查看候选和阻止原因。</li>
-        <li>只有标注为当前 PAPER 流程兼容的版本才会显示可选按钮。选中 <strong>Use for this PAPER check</strong>。</li>
-        <li>服务端要求有具名操作员、运行时 STOPPED、单笔订单账本为空且没有正在执行的联调动作。</li>
-        <li>选择成功后，应用绑定冻结版本、复制并复核回测报告、重建本地组合，并在用户目录的部署审计文件中记录操作员、版本和报告摘要。</li>
+        <li>在<strong>已冻结的回测版本</strong>找到刚才的报告，选择买入或卖出，点击<strong>核对订单证据</strong>。证据匹配后展开<strong>核对开仓时段和风险上限</strong>。可点击<strong>使用当前或下一个交易时段</strong>自动填入时段，再自行确认；手工填写时间须带时区。最多可选择 90 天，起止时间须在美股常规交易时段内。限价、市价等规则需与冻结策略一致。</li>
+        <li>点击<strong>保存 PAPER 草稿</strong>，确认无误后点击<strong>部署已保存的 PAPER 草稿</strong>。保存和部署不会下单。部署时会重放历史数据以准备策略状态，数据较多可能需要等待。</li>
+        <li>在允许的开仓时段点击<strong>启动 PAPER 并处理初始信号</strong>。应用会检查账户、订单和最新完整日线；初始信号投递成功不代表券商已接受订单或订单已成交。</li>
+        <li>若所选窗口覆盖多个交易日，保持应用和 Gateway 运行；应用在后续常规交易时段检查上一交易日的完整日线。缺失、跳过交易日或行情不匹配时会暂停，需先核对并重新准备。应用重启不会自动恢复策略运行。</li>
       </ol>
-      <div class="callout good"><strong>选择版本没有券商副作用。</strong>它不会启动 Gateway、打开派单闸门或提交订单。可先确认 PAPER 状态显示所选版本，再进行下一步。</div>
-      <p>当前 SMA MARKET/按资金比例模板不符合这组固定订单约束，目录会显示阻止原因；它不会被静默改写成一股限价单。</p>
+      <h3>风险上限怎么填</h3>
+      <table><thead><tr><th>页面字段</th><th>含义</th></tr></thead><tbody>
+        <tr><td>单笔上限 USD</td><td>单笔委托允许的最大金额。</td></tr>
+        <tr><td>总持仓上限 USD</td><td>允许的持仓总金额上限。</td></tr>
+        <tr><td>策略预算 USD</td><td>本策略可使用的金额上限。</td></tr>
+        <tr><td>单日亏损上限 USD</td><td>允许的单日亏损上限。</td></tr>
+        <tr><td>每交易日订单上限</td><td>一个交易日允许的订单数量上限。</td></tr>
+      </tbody></table>
+      <p>金额均以美元填写。请结合模拟账户资金及测试目的设置；上限过低会阻止订单。页面会显示具体阻止原因，调整后按提示重新核对并保存草稿。</p>
+      <p>预览不代替运行时账户及报价风险检查。系统会根据已配置上限和实际可用事实决定是否允许订单；事实缺失或不匹配时会阻止操作。</p>
     </section>
-
-    <section id="trade">
-      <h2>在 PAPER 做单笔验证</h2>
-      <ol>
-        <li>确认 Gateway/TWS 已登录 Paper 账户，且 PAPER integration status 的报告证明为 <code>verified</code>、运行时间在有效窗口内。</li>
-        <li>确认订单参数仍为 AAPL BUY 1、LMT $400、DAY、RTH-only。当前配置不会按策略自由扩大数量或金额。</li>
-        <li>在 Execution 页点击 <strong>Run the one-shot PAPER order</strong>。这是唯一会发起本轮模拟单的显式操作。</li>
-        <li>应用读取 IBKR 最新完整 bar，启动托管运行时并先做账户、持仓、开放委托对账；通过后只送出这一笔订单。</li>
-        <li>动作结束后应用关闭派单闸门、转为暂停状态并请求新的券商账户快照。查看订单 ACK/拒绝、成交回报和快照中的实际持仓。</li>
-      </ol>
-      <div class="callout warn"><strong>收到 ACK 不等于成交。</strong>限价单可能被接受但没有成交；以成交回报和后续 IBKR position snapshot 为准。应用不会用本地 fill 数量猜测账户持仓。</div>
-      <div class="callout bad"><strong>请勿把此流程切换到 LIVE。</strong>当前流程只使用本地 PAPER profile 和受限单笔授权；LIVE 下单能力保持禁用。</div>
+    <section id="orders">
+      <h2>查看订单、撤单和停止</h2>
+      <p>在 Execution 页查看 PAPER 会话状态、订单和成交历史。订单和成交历史显示本机记录。ACK 或 Submitted 表示券商已接收或挂出委托，不等于成交；部分成交时仍需核对剩余数量、成交记录和券商持仓。</p>
+      <p>对本应用持有的活动委托，可点击<strong>撤销这笔 PAPER 委托</strong>。开仓时段结束不会自动取消委托，也不会因此禁止对符合条件的已有订单请求撤单。请求发出后应等待券商确认；已成交部分不会撤销。结果未知或拒绝时先在 Gateway 核对，不要假定已撤销。</p>
+      <p>停止会话会停止新增订单，但不会自动撤销已有委托。暂停后的草稿不能直接重新开启派单：请先停止会话、核对订单并准备新的回测后再启动。若会话已停止，可按页面提示恢复原保存部署并重新连接，以暂停状态对账和管理符合条件的活动订单。恢复依赖原草稿、本机配置及匹配的订单记录；存在发送结果未决或跨部署订单时会拒绝恢复。</p>
+      <p>真实 Gateway 的撤单回报和恢复仍待验收。真实 PAPER 订单的 ACK、成交及对账由伙伴后续验证；目前没有以真实订单验证这些结果。</p>
     </section>
-
-    <section id="results">
-      <h2>结果核验与记录</h2>
-      <table>
-        <thead><tr><th>观察到的状态</th><th>含义</th><th>下一步</th></tr></thead>
-        <tbody>
-          <tr><td>ACK / Submitted</td><td>IBKR 已接收或挂出委托，不代表成交。</td><td>查看 executions 与新鲜持仓快照。</td></tr>
-          <tr><td>Rejected</td><td>券商拒单；购买力、合约或账户条件可能不满足。</td><td>保留拒绝回报和错误码；不要通过放宽上限重试。</td></tr>
-          <tr><td>部分成交</td><td>部分股数已成交，剩余量仍可能活动或被取消。</td><td>对照累计成交、剩余股数、开放委托和对账后的持仓。</td></tr>
-          <tr><td>Filled</td><td>订单已完全成交。</td><td>核对成交明细、手续费和 broker position snapshot。</td></tr>
-          <tr><td>Reconciliation failed</td><td>券商快照不足以确认账户最终状态。</td><td>保留暂停状态；先通过 PAPER recovery/reconciliation 恢复，不要再次下单。</td></tr>
-        </tbody>
-      </table>
-      <p>验收时记录运行时间、策略版本 ID、Backtrader 报告摘要、订单状态、IBKR execution IDs、成交股数/价格/费用、对账时间和实际持仓变化。不要记录账户凭证或 operator token。</p>
-      <p>活动列表会显示券商订单号和已有成交的 execution ID，方便与 Gateway 核对。券商订单号的出现本身不证明 IBKR 已接受委托；查看订单状态和回报。若遭拒绝，具体错误码与原因请同时查看 Gateway。</p>
-      <p>停止运行后，页面仍可查看本机保存的订单与成交历史；此时当前券商持仓显示为未知。重新启动并完成对账后，才能查看新的券商持仓快照。</p>
-      <p>如果订单仍处于已接收或部分成交状态且需要撤销，在运行时仍持有连接的情况下，点击该订单旁的<strong>撤销这笔 PAPER 委托</strong>。这需要该操作员有当前 PAPER 账户的 <code>cancel</code> 授权。请求发送后仍需等待并查看券商撤单回报；已成交部分不会被撤销。</p>
-    </section>
-
     <section id="troubleshoot">
       <h2>常见问题</h2>
-      <table>
-        <thead><tr><th>现象</th><th>原因和处理</th></tr></thead>
-        <tbody>
-          <tr><td>没有 PAPER 来源凭证</td><td>用 IBKR PAPER 按钮重新获取日线；确认选择的是 PAPER profile/端口，再重新预览。手动上传或改 provider 标签不算来源证明。</td></tr>
-          <tr><td>策略不在可部署候选中</td><td>展开阻止原因。常见情况是 instrument 不等于 AAPL、数量不是 1、订单不是 LIMIT $400、评估日期多于一天或没有恰好一笔未成交 BUY。</td></tr>
-          <tr><td>执行时提示最新完整 bar 与冻结信号日不一致</td><td>重新从 PAPER 拉取数据，将单日评估日期设为 Gateway 最新完整交易日，重新预览、回测并选择新冻结版本。执行前请确认单笔账本仍允许选择版本。</td></tr>
-          <tr><td>Gateway 无法连接</td><td>确认 Gateway 已登录 Paper 账户、本地 API 已启用、端口与应用配置一致；不要切换到 LIVE 端口。</td></tr>
-          <tr><td>Python worker 未配置或不可用</td><td>确认应用主机的 Docker 上下文 <code>colima-vibe-execution</code> 已运行，并在应用配置中设置 <code>VIBE_PYTHON_WORKER_IMAGE</code> 为本机已构建的镜像 ID。构建和检查命令见项目 <code>agent/src/execution/strategy_worker_image/README.md</code>；配置后重启 API。</td></tr>
-          <tr><td>按钮显示窗口未开放</td><td>当前写入授权只在 2026-11-02 14:30–21:00 UTC 生效；不在窗口内提交。新窗口需由授权负责人重新配置。</td></tr>
-          <tr><td>没有权限或 grant expired</td><td>请管理员检查具名 operator token 和对应 PAPER action grant 的账户、动作及有效期。</td></tr>
-          <tr><td>订单已接受但无 fill</td><td>限价或市场状态可能使委托保持 open；查看 IBKR 状态并以 broker snapshot 核对，不能把未成交当成成功闭环。</td></tr>
-        </tbody>
-      </table>
+      <table><thead><tr><th>现象</th><th>处理</th></tr></thead><tbody>
+        <tr><td>无法核验 PAPER 账户</td><td>确认 Gateway 已登录 Paper、启用本机 API，且只有一个目标会话和账户，然后重试。</td></tr>
+        <tr><td>找不到已冻结的回测版本</td><td>先完成“校验并预览上传内容”和“确认并运行 Backtrader”，等待报告保存；检查报告是否成功及行情是否来自 IBKR PAPER。</td></tr>
+        <tr><td>候选或草稿被阻止</td><td>查看页面给出的合约、冻结参数、行情证据、时段或风险原因；按提示重新准备回测或草稿。</td></tr>
+        <tr><td>最新日线不一致</td><td>重新从 PAPER 获取最新完整日线，重新预览并回测，再保存和部署草稿。</td></tr>
+        <tr><td>订单接受但没有成交</td><td>查看券商订单状态、成交和持仓；限价单可能保持活动。需要时按页面撤单并等待回报。</td></tr>
+      </tbody></table>
     </section>
-
-    <footer>
-      对应操作说明和授权命令见 <code>PAPER_OPERATORS.md</code>。本手册记录当前固定的一笔 AAPL PAPER 验证包络；它不是通用风险授权。报告数据的历史时点可用性和 IBKR 复权语义仍需结合数据说明判断。<br>
-      Vibe-Trading · Backtrader / IBKR PAPER · 2026-10-31
-    </footer>
+    <footer>本手册适用于 0.3.0 Windows PAPER 测试包。IBKR 行情的历史可用时间及复权语义仍需结合数据说明判断。</footer>
   </main>
 </body>
 </html>

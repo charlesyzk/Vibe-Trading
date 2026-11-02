@@ -403,6 +403,11 @@ def test_managed_runtime_manager_cancel_is_bound_and_confirmation_is_callback_dr
 
     assert pending.state.value == "CANCEL_PENDING"
     assert process.cancel_calls == [41]
+    def cancel_state():
+        return runtime.ledger.list_activity_for_scope(
+            broker="IBKR", account_ref=runtime.account_ref, environment=Environment.PAPER
+        )[0]["cancel_state"]
+    assert cancel_state() == "SEND_STARTED"
     with pytest.raises(ManagedRuntimeError, match="already attempted"):
         runtime.cancel_owned_order(order.intent_id)
     assert process.cancel_calls == [41]
@@ -412,6 +417,7 @@ def test_managed_runtime_manager_cancel_is_bound_and_confirmation_is_callback_dr
     while runtime.ledger.get_order(order.intent_id).state.value != "CANCELLED" and time.monotonic() < deadline:
         time.sleep(0.005)
     assert runtime.ledger.get_order(order.intent_id).state.value == "CANCELLED"
+    assert cancel_state() == "CONFIRMED"
     with sqlite3.connect(runtime.ledger.path) as db:
         assert db.execute("SELECT state FROM cancel_attempt WHERE intent_id=?", (order.intent_id,)).fetchone()[0] == "CONFIRMED"
     assert runtime.stop() is True
@@ -427,6 +433,9 @@ def test_managed_runtime_cancel_send_unknown_is_frozen_without_retry(tmp_path):
     with pytest.raises(ManagedRuntimeError, match="unknown; reconcile before retry"):
         runtime.cancel_owned_order(order.intent_id)
     assert process.cancel_calls == [41]
+    assert runtime.ledger.list_activity_for_scope(
+        broker="IBKR", account_ref=runtime.account_ref, environment=Environment.PAPER
+    )[0]["cancel_state"] == "UNKNOWN"
     with sqlite3.connect(runtime.ledger.path) as db:
         assert db.execute("SELECT state FROM cancel_attempt WHERE intent_id=?", (order.intent_id,)).fetchone()[0] == "UNKNOWN"
     with pytest.raises(ManagedRuntimeError, match="already attempted"):
@@ -441,6 +450,58 @@ def test_managed_runtime_cancel_send_unknown_is_frozen_without_retry(tmp_path):
     assert runtime.ledger.get_order(order.intent_id).state.value == "CANCELLED"
     assert runtime.stop() is True
     allocator.close()
+
+
+def test_cancel_owned_order_while_stop_waits_for_quiescence(tmp_path):
+    runtime, process, service, allocator, events = _build_runtime(tmp_path)
+    _start_runtime(runtime, process, events)
+    order = _authorized_active_order(runtime)
+    runtime._external_quiesce_check = lambda: False
+    assert runtime.stop() is False
+    assert service.state()[0] is ExecutionControlState.STOPPING
+    assert service.lease_held
+
+    assert runtime.cancel_owned_order(order.intent_id).state.value == "CANCEL_PENDING"
+    assert process.cancel_calls == [41]
+    events.put(_raw("order_status", order_id=41, status="Cancelled"))
+    deadline = time.monotonic() + 1.0
+    while runtime.ledger.get_order(order.intent_id).state.value != "CANCELLED" and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert runtime.ledger.get_order(order.intent_id).state.value == "CANCELLED"
+    runtime._external_quiesce_check = lambda: True
+    assert runtime.stop() is True
+    allocator.close()
+
+
+def test_stop_waits_boundedly_for_inbox_delivery_before_releasing_lease(tmp_path):
+    runtime, process, service, allocator, events = _build_runtime(tmp_path)
+    _start_runtime(runtime, process, events)
+    original = runtime.order_index.pending_inbox
+    pending_seen = threading.Event()
+    allow_drain = threading.Event()
+
+    def delayed_inbox():
+        if threading.current_thread().name == "test-stop-wait" and not allow_drain.is_set():
+            pending_seen.set()
+            return [("fixture", object())]
+        return original()
+
+    runtime.order_index.pending_inbox = delayed_inbox
+    outcome = []
+    thread = threading.Thread(target=lambda: outcome.append(runtime.stop()), name="test-stop-wait")
+    thread.start()
+    try:
+        assert pending_seen.wait(2)
+        assert service.lease_held
+        allow_drain.set()
+        thread.join(3)
+        assert not thread.is_alive()
+        assert outcome == [True]
+        assert not service.lease_held
+    finally:
+        allow_drain.set()
+        thread.join(3)
+        allocator.close()
 
 
 def test_runtime_rejects_wrong_managed_account_and_keeps_dispatch_closed(tmp_path):

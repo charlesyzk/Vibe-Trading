@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from datetime import timedelta, timezone
 from decimal import Decimal
@@ -107,6 +108,27 @@ def test_replay_child_output_is_capped_and_child_is_terminated(tmp_path, stream,
         report_replay._run_replay_worker(
             b"", timeout_seconds=10, cwd=tmp_path, command=command,
         )
+
+
+def test_threaded_replay_pipes_roundtrip_and_output_limit():
+    def launch(code):
+        return subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+
+    process = launch("import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stderr.write('ok')")
+    assert report_replay._run_replay_pipes_threaded(process, b"hello" * 50000, 10) == (0, b"hello" * 50000, b"ok")
+    process = launch("import sys; sys.stderr.write('x' * 100000); sys.stderr.flush()")
+    with pytest.raises(ReportReplayMismatch, match="stderr exceeded"):
+        report_replay._run_replay_pipes_threaded(process, b"", 10)
+
+
+def test_threaded_replay_timeout_terminates_worker_blocked_on_input():
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, bufsize=0)
+    with pytest.raises(TimeoutError, match="timed out"):
+        report_replay._run_replay_pipes_threaded(process, b"x" * 1_000_000, 0.2)
+    assert process.poll() is not None
 
 
 def test_replay_rejects_oversized_decision_reason_before_child_launch(monkeypatch):

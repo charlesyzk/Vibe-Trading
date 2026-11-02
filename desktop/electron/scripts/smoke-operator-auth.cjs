@@ -15,9 +15,10 @@ app.whenReady().then(async () => {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
+  const profileToken = `vtdp_${"a".repeat(43)}`;
   const window = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.webContents.session.webRequest.onBeforeSendHeaders({ urls: ["http://127.0.0.1/*"] }, (details, callback) => {
-    if (new URL(details.url).origin === origin) applyBackendAuthorization(details.requestHeaders, "internal-test-key", details.url);
+    if (new URL(details.url).origin === origin) applyBackendAuthorization(details.requestHeaders, "internal-test-key", details.url, profileToken);
     callback({ requestHeaders: details.requestHeaders });
   });
   try {
@@ -26,10 +27,12 @@ app.whenReady().then(async () => {
       const headers = { Authorization: 'Bearer vtpo_fixture-123' };
       const paper = await (await fetch('/api/execution/paper/start', { headers })).json();
       const settings = await (await fetch('/api/settings', { headers })).json();
-      return { paper, settings };
+      const automatic = await (await fetch('/api/execution/paper/status')).json();
+      return { paper, settings, automatic };
     })()`);
     assert.equal(result.paper.authorization, "Bearer vtpo_fixture-123");
     assert.equal(result.settings.authorization, "Bearer internal-test-key");
+    assert.equal(result.automatic.authorization, `Bearer ${profileToken}`);
     console.log("Electron webRequest preserved PAPER operator identity and routed settings to internal key");
   } finally {
     window.destroy();

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import logging
+import os
 import re
 import secrets
 import threading
@@ -489,6 +490,14 @@ def _validate_api_auth(
         _reject_cross_site_browser_request(request)
 
     api_key = _configured_api_key()
+    presented = cred.credentials if cred and cred.credentials else ""
+    desktop_token = os.environ.get("VIBE_PAPER_DESKTOP_TOKEN", "")
+    desktop_subject = os.environ.get("VIBE_PAPER_DESKTOP_SUBJECT", "")
+    if (request.url.path.startswith("/api/execution/paper/") and _is_local_client(request)
+            and re.fullmatch(r"vtdp_[A-Za-z0-9_-]{40,128}", desktop_token)
+            and desktop_subject.startswith("desktop-profile:") and len("desktop-profile:") < len(desktop_subject) <= 200
+            and presented and hmac.compare_digest(presented, desktop_token)):
+        return Principal(subject=desktop_subject, auth_method=AuthMethod.LOCAL_DESKTOP_PROFILE)
     if api_key:
         token = _auth_credential_from_header_or_query(cred, query_api_key, allow_query=allow_query)
         if token and hmac.compare_digest(token, api_key):

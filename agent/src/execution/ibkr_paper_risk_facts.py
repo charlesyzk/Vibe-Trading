@@ -10,14 +10,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+import re
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
-from src.execution.contracts import Environment, RiskGrant
+from src.execution.contracts import Environment, RiskGrant, is_sha256
 from src.execution.ibkr_market_facts import (
     IbkrExecutionQuote,
     convert_to_usd,
 )
 from src.execution.risk import PositionFact, RiskFacts
+from src.execution.risk import ProposedOrder
 
 
 class IbkrPaperRiskFactsError(ValueError):
@@ -124,6 +127,78 @@ class StrategyRiskMetrics:
     estimated_fees: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class PaperOrderPolicy:
+    """Trusted exact order envelope bound to an account and frozen version."""
+
+    account_ref: str
+    strategy_version_hash: str
+    order: ProposedOrder
+
+    def __post_init__(self) -> None:
+        from src.execution.contracts import is_sha256
+
+        if not isinstance(self.account_ref, str) or re.fullmatch(r"DU[A-Z0-9]+", self.account_ref) is None:
+            raise ValueError("one explicit IBKR PAPER account is required")
+        if not isinstance(self.strategy_version_hash, str) or not is_sha256(self.strategy_version_hash):
+            raise ValueError("a frozen strategy SHA-256 is required")
+        if not isinstance(self.order, ProposedOrder):
+            raise TypeError("order must be a validated ProposedOrder")
+
+    @classmethod
+    def from_frozen_version(cls, *, account_ref: str, version: Any, order: ProposedOrder) -> "PaperOrderPolicy":
+        """Bind an exact order to the installed immutable Python strategy record."""
+        from src.execution.contracts import SourceKind
+        from src.execution.versions import StrategyVersionRecord
+
+        if (not isinstance(version, StrategyVersionRecord)
+                or version.source_kind is not SourceKind.PYTHON_UPLOAD
+                or version.version_id != version.version_hash):
+            raise ValueError("a frozen Python-upload strategy version is required")
+        if not isinstance(order, ProposedOrder):
+            raise TypeError("order must be a validated ProposedOrder")
+        spec = version.spec
+        bar = spec.bar_policy
+        execution = spec.execution_policy
+        if (
+            tuple(spec.instrument_ids) != (order.instrument_id,)
+            or bar.timeframe != "1d"
+            or bar.session != "regular"
+            or bar.completed_only is not True
+            or bar.calendar_id != "us_equity_rth"
+            or bar.timezone != "America/New_York"
+            or spec.position_policy.mode.value != "explicit_quantity"
+            or spec.position_policy.long_only is not True
+            or spec.position_policy.whole_shares is not True
+            or spec.position_policy.allocation_fraction is not None
+            or spec.position_policy.rebalance is not None
+            or spec.position_policy.initial_entry is not None
+            or type(spec.parameters.get("quantity")) is not int
+            or spec.parameters["quantity"] != order.integer_qty
+            or execution.decision != "completed_bar_available"
+            or execution.dispatch != "next_regular_session"
+            or execution.gap_action != "reject_and_pause"
+            or execution.missed_session_action != "expire_and_pause"
+            or spec.execution_policy.order_type != order.order_type
+            or spec.execution_policy.time_in_force != order.time_in_force
+            or spec.execution_policy.outside_rth is not False
+            or spec.parameters.get("order_type") != order.order_type
+            or (spec.parameters.get("side") is not None and spec.parameters["side"] != order.side)
+        ):
+            raise ValueError("order differs from frozen strategy instrument, sizing, or execution policy")
+        frozen_limit = spec.parameters.get("limit_price_usd")
+        if order.order_type == "limit":
+            try:
+                limit = Decimal(str(frozen_limit))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValueError("frozen strategy limit price is invalid") from exc
+            if not limit.is_finite() or limit != order.limit_price:
+                raise ValueError("order limit price differs from frozen strategy")
+        elif frozen_limit is not None:
+            raise ValueError("market strategy cannot include a frozen limit price")
+        return cls(account_ref=account_ref, strategy_version_hash=version.version_id, order=order)
+
+
 SnapshotReader = Callable[[], Mapping[str, Any]]
 QuoteReader = Callable[[VerifiedIbkrContract], Mapping[str, Any]]
 FxQuoteReader = Callable[[str], Mapping[str, Any]]
@@ -201,6 +276,7 @@ class IbkrPaperRiskFactsProvider:
         quote_reader: QuoteReader,
         fx_quote_reader: FxQuoteReader,
         metrics_reader: MetricsReader,
+        order_policy: PaperOrderPolicy | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         if not account_ref or len(strategy_version_hash) != 64:
@@ -211,6 +287,17 @@ class IbkrPaperRiskFactsProvider:
                 or risk_grant.environment is not Environment.PAPER
                 or risk_grant.strategy_version_hash != strategy_version_hash):
             raise ValueError("risk grant scope differs from configured PAPER strategy")
+        if order_policy is not None:
+            if not isinstance(order_policy, PaperOrderPolicy):
+                raise TypeError("order_policy must be a PaperOrderPolicy")
+            if (order_policy.account_ref != account_ref
+                    or order_policy.strategy_version_hash != strategy_version_hash
+                    or order_policy.order.instrument_id not in risk_grant.allowed_instruments
+                    or order_policy.order.order_type not in risk_grant.allowed_order_types):
+                raise ValueError("order policy differs from the trusted PAPER risk grant")
+            if (order_policy.order.order_type == "limit"
+                    and Decimal(order_policy.order.integer_qty) * order_policy.order.limit_price > risk_grant.max_order_notional):
+                raise ValueError("order policy exceeds the per-order notional limit")
         if not contracts or any(key != value.instrument_id for key, value in contracts.items()):
             raise ValueError("contracts must be keyed by their exact instrument ids")
         if not set(risk_grant.allowed_instruments).issubset(contracts):
@@ -226,6 +313,7 @@ class IbkrPaperRiskFactsProvider:
         self.account_ref = account_ref
         self.strategy_version_hash = strategy_version_hash
         self.risk_grant = risk_grant
+        self.order_policy = order_policy
         self.contracts = dict(contracts)
         self.by_con_id = {contract.con_id: contract for contract in contracts.values()}
         self.fx_contract_ids = dict(fx_contract_ids)
@@ -247,13 +335,81 @@ class IbkrPaperRiskFactsProvider:
     def __call__(self, intent: Any, *, excluding_intent_id: str) -> Any:
         """Return ``DispatchRiskSnapshot`` without importing dispatch modules."""
         from src.execution.dispatch_service import DispatchRiskSnapshot
+        from src.execution.paper_order_preparation import next_session_dispatch_close
 
+        self._check_order_policy(intent)
         facts = self.build(intent, self.risk_grant)
+        try:
+            next_session_dispatch_close(intent.bar_end, facts.now)
+        except (AttributeError, ValueError) as exc:
+            raise IbkrPaperRiskFactsError("PAPER signal is stale or outside its next trading session") from exc
         return DispatchRiskSnapshot(
             grant=self.risk_grant,
             facts=facts,
             deployment_id=intent.deployment_id,
         )
+
+    def proposal_inputs(self, proposal: Any) -> Any:
+        """Build pre-ledger risk inputs from the same trusted facts as dispatch."""
+        from src.execution.outbox_dispatch import OutboxProposal, ProposalRiskInputs
+        from src.execution.paper_order_preparation import next_session_dispatch_close
+
+        if not isinstance(proposal, OutboxProposal):
+            raise TypeError("proposal must be an OutboxProposal")
+        identity = proposal.identity
+        if not isinstance(identity, dict) or (
+            identity.get("account_ref") != self.account_ref
+            or identity.get("environment") != Environment.PAPER.value
+            or identity.get("strategy_version_hash") != self.strategy_version_hash
+            or not isinstance(identity.get("deployment_id"), str)
+            or not identity["deployment_id"].strip()
+        ):
+            raise IbkrPaperRiskFactsError("proposal identity differs from configured PAPER strategy")
+        if not isinstance(proposal.proposal, Mapping) or proposal.proposal.get("side") not in {"BUY", "SELL"}:
+            raise IbkrPaperRiskFactsError("proposal side must be BUY or SELL")
+        try:
+            order = ProposedOrder(
+                instrument_id=proposal.bar.instrument_id, side=proposal.proposal["side"],
+                integer_qty=proposal.proposal["integer_qty"], order_type=proposal.proposal["order_type"],
+                time_in_force=proposal.proposal["time_in_force"], limit_price=proposal.proposal.get("limit_price"),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise IbkrPaperRiskFactsError("proposal order is invalid") from exc
+        self._check_order_policy(order)
+        now = self._aware(self.now(), "risk clock")
+        grant = self.risk_grant
+        if now < grant.granted_at or now < grant.valid_from or now >= grant.valid_until or (
+            grant.revoked_at is not None and grant.revoked_at <= now
+        ):
+            raise IbkrPaperRiskFactsError("PAPER proposal grant is outside its valid window")
+        facts = self.build(SimpleNamespace(
+            broker="IBKR", account_ref=self.account_ref, environment=Environment.PAPER,
+            strategy_version_hash=self.strategy_version_hash,
+            instrument_id=proposal.bar.instrument_id, side=proposal.proposal["side"],
+            deployment_id=identity["deployment_id"],
+        ), grant)
+        if facts.now < grant.granted_at or facts.now < grant.valid_from or facts.now >= grant.valid_until or (
+            grant.revoked_at is not None and grant.revoked_at <= facts.now
+        ):
+            raise IbkrPaperRiskFactsError("PAPER proposal grant expired while collecting risk facts")
+        try:
+            close = next_session_dispatch_close(proposal.bar.end_at, facts.now)
+        except ValueError as exc:
+            raise IbkrPaperRiskFactsError("PAPER signal is stale or outside its next trading session") from exc
+        return ProposalRiskInputs(grant=grant, facts=facts, eligible_at=facts.now, expires_at=min(grant.valid_until, close))
+
+    def _check_order_policy(self, value: Any) -> None:
+        if self.order_policy is None:
+            raise IbkrPaperRiskFactsError("an explicit PAPER order policy is required")
+        try:
+            order = value if isinstance(value, ProposedOrder) else ProposedOrder(
+                instrument_id=value.instrument_id, side=value.side, integer_qty=value.integer_qty,
+                order_type=value.order_type, time_in_force=value.time_in_force, limit_price=value.limit_price,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise IbkrPaperRiskFactsError("order does not match the PAPER policy") from exc
+        if order != self.order_policy.order:
+            raise IbkrPaperRiskFactsError("order does not match the PAPER policy")
 
     def build(self, intent: Any, grant: RiskGrant) -> RiskFacts:
         if grant != self.risk_grant:
@@ -273,9 +429,14 @@ class IbkrPaperRiskFactsProvider:
         if (snapshot.get("capture_complete") is not True or snapshot.get("reconciled") is not True
                 or snapshot.get("account_ref") != self.account_ref or snapshot.get("environment") != "paper"):
             raise IbkrPaperRiskFactsError("account snapshot is not a complete reconciled PAPER snapshot")
-        if not snapshot.get("facts_sha256"):
+        digest = snapshot.get("facts_sha256")
+        if not isinstance(digest, str) or not is_sha256(digest):
             raise IbkrPaperRiskFactsError("reconciled snapshot has no integrity digest")
-        self._rows(snapshot.get("open_orders"), "open orders")
+        if self._rows(snapshot.get("open_orders"), "open orders"):
+            # Broker orders may reserve cash or shares outside this ledger.
+            # Until those holds can be attributed and valued without double
+            # counting local reservations, zero is not a safe estimate.
+            raise IbkrPaperRiskFactsError("open account orders require reservation reconciliation before new orders")
         account_age = (now - completed).total_seconds()
         if account_age < 0 or account_age > grant.account_max_age_seconds:
             raise IbkrPaperRiskFactsError("reconciled account snapshot is stale or from the future")
@@ -286,7 +447,10 @@ class IbkrPaperRiskFactsProvider:
         net_liquidation = convert_to_usd(account_values["NetLiquidation"], account_currency,
                                          usd_fx_quote=fx, now=now,
                                          max_age_seconds=grant.quote_max_age_seconds)
-        available_cash = convert_to_usd(account_values["AvailableFunds"], account_currency,
+        # AvailableFunds can include margin buying power. Do not authorize
+        # cash-funded orders against more than the account's cash balance.
+        cash_ceiling = min(account_values["AvailableFunds"], account_values["TotalCashValue"])
+        available_cash = convert_to_usd(cash_ceiling, account_currency,
                                         usd_fx_quote=fx, now=now,
                                         max_age_seconds=grant.quote_max_age_seconds)
 
@@ -318,9 +482,25 @@ class IbkrPaperRiskFactsProvider:
                 market_price=usd_mark,
             ))
 
-        metrics = self.metrics_reader(self.strategy_version_hash, intent.instrument_id, now)
+        snapshot_metrics = getattr(self.metrics_reader, "for_snapshot", None)
+        if callable(snapshot_metrics):
+            metrics = snapshot_metrics(self.strategy_version_hash, intent.instrument_id, now, completed, target_quote.bid)
+        else:
+            metrics = self.metrics_reader(self.strategy_version_hash, intent.instrument_id, now)
         if not isinstance(metrics, StrategyRiskMetrics):
             raise IbkrPaperRiskFactsError("host did not provide complete strategy risk/cost facts")
+        position_at = getattr(self.metrics_reader, "position_at", None)
+        if not callable(snapshot_metrics) and callable(position_at):
+            from dataclasses import replace
+            metrics = replace(metrics, strategy_position_qty=position_at(
+                self.strategy_version_hash, intent.instrument_id, completed,
+            ))
+        daily_loss_at = getattr(self.metrics_reader, "daily_loss_at", None)
+        if not callable(snapshot_metrics) and callable(daily_loss_at) and getattr(self.metrics_reader, "previous_bar_reader", None) is not None:
+            from dataclasses import replace
+            metrics = replace(metrics, strategy_daily_loss=daily_loss_at(
+                self.strategy_version_hash, intent.instrument_id, completed, target_quote.bid,
+            ))
         account_position_qty = next((pos.quantity for pos in positions
                                      if pos.instrument_id == intent.instrument_id), 0)
         if metrics.strategy_position_qty > account_position_qty:
@@ -399,7 +579,7 @@ class IbkrPaperRiskFactsProvider:
         result: dict[str, Decimal | str] = {"currency": next(iter(currencies))}
         for row in selected:
             result[str(row["tag"])] = IbkrPaperRiskFactsProvider._decimal(row.get("value"), str(row["tag"]))
-        if result["NetLiquidation"] <= 0 or result["AvailableFunds"] < 0:
+        if result["NetLiquidation"] <= 0 or result["AvailableFunds"] < 0 or result["TotalCashValue"] < 0:
             raise IbkrPaperRiskFactsError("account summary contains invalid net liquidation or available funds")
         return result
 
@@ -436,6 +616,7 @@ __all__ = [
     "IbkrManagedRiskSnapshotSource",
     "IbkrPaperRiskFactsError",
     "IbkrPaperRiskFactsProvider",
+    "PaperOrderPolicy",
     "StrategyRiskMetrics",
     "VerifiedIbkrContract",
 ]

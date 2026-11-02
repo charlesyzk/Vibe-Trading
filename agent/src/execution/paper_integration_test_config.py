@@ -122,6 +122,7 @@ class PaperIntegrationTestConfig(StrictModel):
     environment: Literal["paper"]
     account_ref: str
     strategy_version_id: str | None = None
+    backtest_report_sha256: str | None = None
     endpoint: IntegrationTestEndpoint
     instrument: IntegrationTestInstrument
     order: IntegrationTestOrder
@@ -140,11 +141,11 @@ class PaperIntegrationTestConfig(StrictModel):
             raise ValueError("account_ref must be one explicit IBKR DU PAPER account")
         return value
 
-    @field_validator("strategy_version_id")
+    @field_validator("strategy_version_id", "backtest_report_sha256")
     @classmethod
     def version_id_is_immutable_hash(cls, value: str | None) -> str | None:
         if value is not None and not is_sha256(value):
-            raise ValueError("strategy_version_id must be a lowercase SHA-256 version ID")
+            raise ValueError("strategy version and backtest report IDs must be lowercase SHA-256 hashes")
         return value
 
     @field_validator("prepared_at")
@@ -156,6 +157,8 @@ class PaperIntegrationTestConfig(StrictModel):
 
     @model_validator(mode="after")
     def caps_cover_exact_order(self) -> "PaperIntegrationTestConfig":
+        if self.backtest_report_sha256 is not None and self.strategy_version_id is None:
+            raise ValueError("a pinned backtest report requires a strategy version")
         notional = Decimal(self.order.quantity) * self.order.limit_price
         risk = self.risk
         if notional > risk.max_order_notional_usd:

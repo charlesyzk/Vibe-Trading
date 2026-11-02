@@ -58,6 +58,11 @@ class IbkrPaperCompletedBarSource:
         from src.trading.connectors.ibkr.local import get_historical_bars
 
         observed_at = self._aware(self.now())
+        if after_session is not None:
+            if not isinstance(after_session, date) or isinstance(after_session, datetime):
+                raise TypeError("after_session must be a date")
+            if after_session > observed_at.date():
+                raise IbkrCompletedBarSourceError("incremental cursor is in the future")
         try:
             response = get_historical_bars(
                 self.contract.symbol,
@@ -100,10 +105,14 @@ class IbkrPaperCompletedBarSource:
                 complete_dates.append(session_date)
 
         if after_session is not None:
-            if not isinstance(after_session, date) or isinstance(after_session, datetime):
-                raise TypeError("after_session must be a date")
             complete_dates = [value for value in complete_dates if value > after_session]
             expected_start = after_session
+            expected = tuple(
+                item.session_date for item in build_xnys_schedule(after_session, observed_at.date()).sessions
+                if item.session_date > after_session and item.close_at <= observed_at
+            )
+            if tuple(complete_dates) != expected:
+                raise IbkrCompletedBarSourceError("IBKR history is missing one or more completed XNYS sessions")
         else:
             expected_start = complete_dates[0] if complete_dates else None
         if complete_dates and expected_start is not None:
@@ -132,6 +141,17 @@ class IbkrPaperCompletedBarSource:
         for bar in bars:
             feed.push_completed_bar(bar)
         return len(bars)
+
+    def completed_bar(self, instrument_id: str, session_date: date) -> Bar:
+        """Return the exact qualified completed session bar for risk marking."""
+        if instrument_id != self.contract.instrument_id:
+            raise IbkrCompletedBarSourceError("requested instrument differs from the verified PAPER contract")
+        if not isinstance(session_date, date) or isinstance(session_date, datetime):
+            raise TypeError("session_date must be a date")
+        matches = [bar for bar in self() if bar.session_date == session_date]
+        if len(matches) != 1:
+            raise IbkrCompletedBarSourceError("requested completed session bar is unavailable")
+        return matches[0]
 
     def _validate_contract(self, raw: Any) -> None:
         if not isinstance(raw, Mapping):

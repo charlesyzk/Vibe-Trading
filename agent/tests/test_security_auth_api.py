@@ -240,6 +240,30 @@ def test_named_paper_operator_token_authenticates_an_attributable_principal(
     assert error.value.status_code == 401
 
 
+def test_desktop_profile_token_is_local_paper_only_and_not_a_verified_human(monkeypatch):
+    from fastapi import HTTPException
+    from fastapi.security import HTTPAuthorizationCredentials
+    from starlette.requests import Request
+    import src.api.security as security
+    from src.session.models import AuthMethod
+
+    token = "vtdp_" + "a" * 43
+    monkeypatch.setenv("VIBE_PAPER_DESKTOP_TOKEN", token)
+    monkeypatch.setenv("VIBE_PAPER_DESKTOP_SUBJECT", "desktop-profile:partner")
+    monkeypatch.setattr(security, "_configured_api_key", lambda: "shared-secret")
+    def request(path, host):
+        return Request({"type": "http", "http_version": "1.1", "method": "GET", "scheme": "http", "path": path,
+                        "raw_path": path.encode(), "query_string": b"", "headers": [], "client": (host, 1234),
+                        "server": ("localhost", 80)})
+    cred = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    principal = security._validate_api_auth(request=request("/api/execution/paper/status", "127.0.0.1"), cred=cred)
+    assert principal.auth_method is AuthMethod.LOCAL_DESKTOP_PROFILE
+    assert principal.paper_operator and not principal.attributable
+    for path, host in (("/api/execution/paper/status", "203.0.113.10"), ("/api/settings", "127.0.0.1")):
+        with pytest.raises(HTTPException):
+            security._validate_api_auth(request=request(path, host), cred=cred)
+
+
 def test_interactive_docs_are_loopback_only_in_keyless_dev_mode() -> None:
     """Default docs work locally without exposing the schema to remote peers."""
     local = _local_client()

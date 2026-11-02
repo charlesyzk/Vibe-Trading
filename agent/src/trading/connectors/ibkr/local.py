@@ -656,6 +656,9 @@ class _TwsPool:
             )
         module = _require_ib_async()
         ib = module.IB()
+        # ib_async otherwise defaults to an unbounded synchronous request
+        # timeout, so an unavailable account summary can hang discovery forever.
+        ib.RequestTimeout = config.timeout
         unique_id = self._new_client_id(config.client_id)
         try:
             ib.connect(

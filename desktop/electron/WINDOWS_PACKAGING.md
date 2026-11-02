@@ -1,11 +1,23 @@
 # Windows packaging review notes
 
+> Current validation (2026-11-01): private Windows run `41307336930`
+> passed packaged runtime tests, a clean install and launch, and a
+> same-version reinstall. It predates the cross-day scheduler. The newer
+> `a4eecb9` review build and its Windows tests are in progress. Actual PAPER
+> Gateway connectivity and version-to-version upgrade remain unverified.
+> Review the IBKR SDK license and distribution obligations before sharing the
+> unsigned review artifact. Historical statements below reflect earlier work.
+
 This layer is stacked on the desktop lifecycle shell and adds only:
 
 - an NSIS x64 installer;
 - a checksum-pinned CPython 3.12.10 embedded runtime;
 - the existing production frontend and the upstream hash-locked base Python
   dependencies;
+- a separate hash-locked set of Backtrader, exchange calendar, and IBKR
+  read-only connector dependencies in the main backend;
+- a pinned WASI Python worker and Wasmtime runtime for isolated strategy
+  events without a partner-installed Docker daemon;
 - the verified native DLL subset required for WeasyPrint PDF output;
 - Electron `safeStorage` for LLM, Tushare, and QVeris credentials.
 
@@ -14,7 +26,7 @@ This layer is stacked on the desktop lifecycle shell and adds only:
 - No updater or release feed is included.
 - No optional IM/channel extra is installed.
 - Personal WeChat/Weixin QR pairing is not included.
-- No broker-specific optional dependency is installed.
+- The official isolated IBKR SDK runtime is not assembled by the base command.
 - The review workflow produces an unsigned artifact only; it does not publish a release.
 
 Users can install an optional adapter later from a source/developer environment.
@@ -45,6 +57,52 @@ npm run installer:win:review
 ```
 
 The installer and checksum are written under `desktop/electron/release/`.
+
+### IBKR runtime preparation (not yet a partner build)
+
+After `runtime:win`, a builder with the officially obtained TWS API 1050.02
+`source/pythonclient` and its license file can run:
+
+```powershell
+npm run runtime:ibkr:win -- -OfficialSourceDir C:\path\to\source\pythonclient -OfficialLicenseFile C:\path\to\official-license.txt
+npm run installer:win:paper-review
+```
+
+Alternatively, on a Windows build machine with Node.js, Python 3.12, 7-Zip,
+and the pinned official SDK source and license, run the complete builder flow:
+
+```powershell
+npm run installer:win:paper-build -- -OfficialSourceDir C:\path\to\source\pythonclient -OfficialLicenseFile C:\path\to\official-license.txt
+```
+
+This command is for the builder, not for partners. It verifies the SDK source,
+builds the frontend and embedded backend, assembles the separate IBKR runtime,
+then builds the unsigned review installer. It does not install IB Gateway or
+make the current application partner-ready.
+
+The script checks the SDK source tree against the repository lock, assembles a
+separate embedded Python under `runtime/backend/ibkr-runtime`, installs pinned
+Windows dependency wheels, includes the supplied license, and checks imports
+without connecting to Gateway. It refuses to overwrite an existing runtime.
+The PAPER review command checks for nonempty runtime, SDK, protobuf and license
+files both before packaging and in `release/win-unpacked/resources/backend`.
+It does not inspect the NSIS payload by installing it. The layout check can be
+exercised separately with `npm run test:paper-runtime-packaging`.
+
+For an isolated private Windows CI build, the manual
+`paper-windows-validation.yml` workflow expects the verified SDK under
+`vendor/ibapi/pythonclient` and its license at `vendor/ibapi/LICENSE`. It builds
+the unsigned review artifact, checks the packaged WASI worker, installs and
+launches the application in a disposable profile, then reinstalls the same
+version and checks that profile state survives. This is a same-version
+reinstall check, not evidence of a version-to-version upgrade. The workflow
+refuses to run in a public repository and never connects to Gateway or sends
+an order.
+This step has not yet been validated on Windows, and adding it does not make
+the review installer partner-ready. SDK distribution terms and the resulting
+license bundle must be reviewed before distribution. The WASI worker build and
+smoke tests, automatic setup, and clean-install/upgrade tests remain unverified
+on Windows.
 The `installer:win:review` artifact is deliberately unsigned and must never be
 published to users. The command strips all supported signing credentials,
 disables certificate auto-discovery, and fails unless both the application
@@ -55,6 +113,10 @@ Python dependencies are installed from
 `desktop/electron/requirements-windows-lock.txt` with `--require-hashes`; the
 checked-out Vibe-Trading package is then installed with `--no-deps` so
 packaging cannot silently resolve versions outside that lock.
+The additional PAPER dependency lock is resolved against that base lock and
+installed with `--no-deps`. It pins `ib-async==2.0.1`: version 2.1.0 requires
+`tzdata<2026`, which conflicts with the current base lock. The Windows runtime
+import checks and real Gateway compatibility still require Windows execution.
 
 `prepare:electron` downloads the official Windows x64 Electron archive with
 bounded retries, verifies the checksum shipped by the pinned `electron` npm

@@ -72,6 +72,10 @@ jobs:
         working-directory: desktop/electron
         run: npm ci
 
+      - name: Verify PAPER runtime packaging checks
+        working-directory: desktop/electron
+        run: npm run test:paper-runtime-packaging
+
       - name: Verify dormant update rejection and recovery policy
         working-directory: desktop/electron
         run: npm run test:update-safety

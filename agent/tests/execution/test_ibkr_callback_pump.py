@@ -258,6 +258,116 @@ def test_connectivity_and_unknown_errors_pause_for_reconciliation(tmp_path, erro
         assert "unclassified" in str(pump._fatal)
 
 
+def test_cancel_already_filled_error_marks_outcome_unknown_without_inventing_fill(tmp_path):
+    ledger, _, events, _, _, pump, order = _setup(tmp_path)
+    events.put(_event("order_status", order_id=41, status="Submitted", filled="0", remaining="10"))
+    pump.process_one()
+    ledger.start_cancel(order.intent_id, cancel_id="cancel-1", now=NOW)
+    latch = Event()
+    pump.pause_latch = latch
+    events.put(_event("error", request_id=41, error_code=10148, message="already filled"))
+    with pytest.raises(CallbackPumpFatal, match="require reconciliation"):
+        pump.process_one()
+    assert latch.is_set()
+    record = ledger.get_order(order.intent_id)
+    assert record.state is LocalOrderState.CANCEL_PENDING
+    assert record.filled_qty == 0
+    assert ledger.list_fills(order.intent_id) == []
+    activity = ledger.list_activity_for_scope(broker="IBKR", account_ref="paper-fixture", environment=Environment.PAPER)
+    assert activity[0]["cancel_state"] == "UNKNOWN"
+
+
+def test_cancel_notice_waits_for_order_status_without_blocking_confirmation(tmp_path):
+    ledger, _, events, _, _, pump, order = _setup(tmp_path)
+    events.put(_event("order_status", order_id=41, status="Submitted", filled="0", remaining="10"))
+    pump.process_one()
+    ledger.start_cancel(order.intent_id, cancel_id="cancel-202", now=NOW)
+    events.put(_event("error", request_id=41, error_code=202, message="order cancelled"))
+    assert pump.process_one().disposition == "IGNORED"
+    assert ledger.get_order(order.intent_id).state is LocalOrderState.CANCEL_PENDING
+    events.put(_event("order_status", order_id=41, status="Cancelled", filled="0", remaining="10"))
+    pump.process_one()
+    assert ledger.get_order(order.intent_id).state is LocalOrderState.CANCELLED
+
+
+def test_cancel_notice_for_unknown_order_fails_closed(tmp_path):
+    _, _, events, _, _, pump, _ = _setup(tmp_path)
+    events.put(_event("error", request_id=999, error_code=202, message="order cancelled"))
+    with pytest.raises(CallbackPumpFatal):
+        pump.process_one()
+
+
+def test_cancel_notice_for_another_account_fails_closed(tmp_path):
+    _, index, events, _, _, pump, _ = _setup(tmp_path)
+    index.bind(BrokerOrderBinding(
+        broker_order_id=42, account_ref="other-paper", environment=Environment.PAPER,
+        intent_id="other-intent", bt_order_ref=8, requested_qty=10, side="BUY",
+        contract_id=123, symbol="XYZ", security_type="STK", currency="USD",
+    ))
+    events.put(_event("error", request_id=42, error_code=202, message="order cancelled"))
+    with pytest.raises(CallbackPumpFatal, match="outside configured"):
+        pump.process_one()
+
+
+def test_cancel_already_filled_error_after_fill_preserves_fill_and_marks_attempt_unknown(tmp_path):
+    ledger, _, events, _, _, pump, order = _setup(tmp_path)
+    events.put(_event("order_status", order_id=41, status="Submitted", filled="0", remaining="10"))
+    pump.process_one()
+    ledger.start_cancel(order.intent_id, cancel_id="cancel-1", now=NOW)
+    events.put(_execution(shares="10"))
+    pump.process_one()
+    assert ledger.get_order(order.intent_id).state is LocalOrderState.FILLED
+    events.put(_event("error", request_id=41, error_code=10148, message="already filled"))
+    with pytest.raises(CallbackPumpFatal, match="require reconciliation"):
+        pump.process_one()
+    assert ledger.get_order(order.intent_id).filled_qty == 10
+    assert len(ledger.list_fills(order.intent_id)) == 1
+    activity = ledger.list_activity_for_scope(broker="IBKR", account_ref="paper-fixture", environment=Environment.PAPER)
+    assert activity[0]["cancel_state"] == "UNKNOWN"
+
+
+def test_partial_fill_during_cancel_remains_pending_until_confirmed(tmp_path):
+    ledger, _, events, _, _, pump, order = _setup(tmp_path)
+    events.put(_event("order_status", order_id=41, status="Submitted", filled="0", remaining="10"))
+    pump.process_one()
+    ledger.start_cancel(order.intent_id, cancel_id="cancel-partial", now=NOW)
+    events.put(_execution(shares="4"))
+    pump.process_one()
+    record = ledger.get_order(order.intent_id)
+    assert record.state is LocalOrderState.CANCEL_PENDING
+    assert record.filled_qty == 4 and record.remaining_qty == 6
+    events.put(_event("error", request_id=41, error_code=202, message="order cancelled"))
+    assert pump.process_one().disposition == "IGNORED"
+    assert ledger.get_order(order.intent_id).state is LocalOrderState.CANCEL_PENDING
+    events.put(_event("order_status", order_id=41, status="Cancelled", filled="4", remaining="6"))
+    pump.process_one()
+    record = ledger.get_order(order.intent_id)
+    assert record.state is LocalOrderState.CANCELLED
+    assert record.filled_qty == 4
+    activity = ledger.list_activity_for_scope(broker="IBKR", account_ref="paper-fixture", environment=Environment.PAPER)
+    assert activity[0]["cancel_state"] == "CONFIRMED"
+
+
+def test_partial_fill_during_cancel_rejection_restores_working_status(tmp_path):
+    ledger, _, events, _, _, pump, order = _setup(tmp_path)
+    events.put(_event("order_status", order_id=41, status="Submitted", filled="0", remaining="10"))
+    pump.process_one()
+    ledger.start_cancel(order.intent_id, cancel_id="cancel-partial", now=NOW)
+    events.put(_execution(shares="4"))
+    pump.process_one()
+    ledger.record_broker_event({
+        "broker": "IBKR", "account_ref": "paper-fixture", "environment": "paper",
+        "intent_id": order.intent_id, "broker_event_id": "cancel-rejected-fixture",
+        "kind": "CANCEL_REJECTED", "occurred_at": NOW, "received_at": NOW,
+        "broker_order_id": "41",
+    })
+    record = ledger.get_order(order.intent_id)
+    assert record.state is LocalOrderState.PARTIALLY_FILLED
+    assert record.filled_qty == 4 and record.remaining_qty == 6
+    activity = ledger.list_activity_for_scope(broker="IBKR", account_ref="paper-fixture", environment=Environment.PAPER)
+    assert activity[0]["cancel_state"] == "REJECTED"
+
+
 def test_bound_order_rejection_is_durably_applied_to_ledger_and_native_callback(tmp_path):
     ledger, index, events, _, delivered, pump, order = _setup(tmp_path)
     payload = {

@@ -485,6 +485,8 @@ class SQLiteEventJournal:
                     ))
                 if records and canonical_json(checkpoint) != canonical_json(records[-1].result.state):
                     raise ValueError("committed checkpoint differs from final prefix result")
+                if not records and checkpoint != initial:
+                    raise ValueError("checkpoint differs from its initial value")
                 connection.commit()
                 return CommittedEventPrefix(
                     run_id=run_id,
@@ -673,7 +675,7 @@ class SQLiteEventJournal:
     ) -> None:
         """Verify the checkpoint is exactly the prefix before the retry cursor."""
         run = connection.execute(
-            "SELECT checkpoint_json FROM execution_run WHERE run_id = ?", (run_id,)
+            "SELECT checkpoint_json,initial_checkpoint_json FROM execution_run WHERE run_id = ?", (run_id,)
         ).fetchone()
         if run is None:
             raise RunUnavailable("run does not exist")
@@ -684,8 +686,15 @@ class SQLiteEventJournal:
         except (TypeError, ValueError) as exc:
             raise JournalError("paused event checkpoint is invalid") from exc
         if seq == 1:
-            if checkpoint:
-                raise JournalError("initial retry checkpoint is not empty")
+            initial_json = run["initial_checkpoint_json"]
+            if initial_json is None:
+                initial_json = "{}"
+            try:
+                initial = cls._strict_json_object(initial_json)
+                if canonical_json(initial) != initial_json or checkpoint != initial:
+                    raise ValueError("initial checkpoint differs")
+            except (TypeError, ValueError) as exc:
+                raise JournalError("initial retry checkpoint differs from its seed") from exc
             return
         prior = connection.execute(
             """SELECT e.event_id, e.committed_at AS event_committed_at,
@@ -878,7 +887,7 @@ class SQLiteEventJournal:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT state, next_seq, checkpoint_json FROM execution_run WHERE run_id = ?", (run_id,)
+                "SELECT state, next_seq, checkpoint_json, initial_checkpoint_json FROM execution_run WHERE run_id = ?", (run_id,)
             ).fetchone()
             if row is None:
                 connection.rollback()
@@ -899,6 +908,11 @@ class SQLiteEventJournal:
                 if premature_result is not None:
                     raise ValueError("event result exists at or beyond the active cursor")
                 if seq == 1:
+                    initial_json = row["initial_checkpoint_json"]
+                    if initial_json is not None:
+                        initial = self._strict_json_object(initial_json)
+                        if canonical_json(initial) != initial_json or checkpoint != initial:
+                            raise ValueError("checkpoint differs from its initial value")
                     connection.commit()
                     return checkpoint
 

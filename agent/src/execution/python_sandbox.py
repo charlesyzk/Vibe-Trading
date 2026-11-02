@@ -14,6 +14,7 @@ import os
 import re
 import selectors
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -387,6 +388,8 @@ def _communicate_bounded(
     max_output_bytes: int,
 ) -> tuple[int, bytes, bytes]:
     """Pipe a request while bounding combined stdout/stderr and wall time."""
+    if os.name == "nt":
+        return _communicate_bounded_threaded(argv, input_bytes, timeout=timeout, max_output_bytes=max_output_bytes)
     try:
         process = subprocess.Popen(
             argv,
@@ -410,8 +413,6 @@ def _communicate_bounded(
     selector.register(process.stderr, selectors.EVENT_READ, "stderr")
     for stream in (process.stdin, process.stdout, process.stderr):
         # os.set_blocking is available on supported Python 3.11+ platforms.
-        import os
-
         os.set_blocking(stream.fileno(), False)
 
     deadline = time.monotonic() + timeout
@@ -466,3 +467,92 @@ def _communicate_bounded(
                 stream.close()
             except OSError:
                 pass
+
+
+def _communicate_bounded_threaded(
+    argv: list[str], input_bytes: bytes, *, timeout: float, max_output_bytes: int,
+) -> tuple[int, bytes, bytes]:
+    """Bound anonymous-pipe I/O on Windows, where selectors support sockets only."""
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, bufsize=0)
+    except OSError as exc:
+        raise SandboxUnavailable(f"could not start worker process: {exc}") from exc
+    assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    lock = threading.Lock()
+    failure = threading.Event()
+    errors: list[BaseException] = []
+    stdout, stderr = bytearray(), bytearray()
+
+    def write_input() -> None:
+        try:
+            view = memoryview(input_bytes)
+            while view and not failure.is_set():
+                written = process.stdin.write(view[:65536])
+                if not written:
+                    raise OSError("worker stdin made no progress")
+                view = view[written:]
+        except (BrokenPipeError, OSError):
+            # A worker may reject a request before reading it all; its exit
+            # code and bounded output remain the authoritative result.
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
+    def read_output(stream, target: bytearray) -> None:
+        try:
+            while not failure.is_set():
+                chunk = stream.read(min(65536, max_output_bytes + 1))
+                if not chunk:
+                    return
+                with lock:
+                    if len(stdout) + len(stderr) + len(chunk) > max_output_bytes:
+                        errors.append(SandboxOutputLimit(f"worker output exceeded {max_output_bytes} byte limit"))
+                        failure.set()
+                        return
+                    target.extend(chunk)
+        except OSError:
+            if process.poll() is None and not failure.is_set():
+                with lock:
+                    errors.append(SandboxExecutionError("worker output pipe failed"))
+                    failure.set()
+
+    threads = [threading.Thread(target=write_input, daemon=True),
+               threading.Thread(target=read_output, args=(process.stdout, stdout), daemon=True),
+               threading.Thread(target=read_output, args=(process.stderr, stderr), daemon=True)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if failure.is_set():
+                raise errors[0]
+            if process.poll() is not None and all(not thread.is_alive() for thread in threads):
+                return process.returncode, bytes(stdout), bytes(stderr)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SandboxTimeout(f"worker exceeded {timeout:g} second wall-clock timeout")
+            failure.wait(min(0.02, remaining))
+    finally:
+        failure.set()
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        for thread in threads:
+            thread.join(timeout=0.2)
+        # Do not block closing a pipe still owned by a blocked daemon thread.
+        for thread, stream in zip(threads, (process.stdin, process.stdout, process.stderr)):
+            if not thread.is_alive():
+                try:
+                    stream.close()
+                except OSError:
+                    pass

@@ -9,7 +9,7 @@ import { useSSE, type SSEStatus } from "@/hooks/useSSE";
 
 const copy = {
   en: {
-    eyebrow: "Execution lab / offline",
+    eyebrow: "PAPER simulation · LIVE trading disabled",
     title: "Backtrader, one bar at a time.",
     intro: "Run a trusted SMA or RSI template with provider history or the selected local IBKR read-only connection. Backtests never start a broker strategy or place orders.",
     engine: "Execution backend",
@@ -46,7 +46,7 @@ const copy = {
     python: "Uploaded Python",
     pythonDetail: "Uploaded strategies can be frozen and backtested offline. A Python version with a verified IBKR replay that proves the exact authorized AAPL order can be selected for the one-shot PAPER flow; broker-side execution is a separate operator action.",
     pythonUploadTitle: "Run an isolated Python upload",
-    pythonUploadDescription: "Upload a Python file, completed-bar CSV, and session schedule JSON. Freeze quantity and MARKET/LIMIT policy with the Backtrader report. A compatible IBKR PAPER report can then be selected for the fixed one-shot AAPL test.",
+    pythonUploadDescription: "Upload a Python file, completed-bar CSV, and session schedule JSON. Freeze the instrument, quantity and MARKET/LIMIT policy in a Backtrader report. Eligible reports can be checked for a PAPER draft; the fixed AAPL one-shot test is separate.",
     pythonPositionQuantity: "Explicit whole-share quantity",
     pythonOrderType: "Backtest order type",
     pythonLimitPrice: "Limit price (USD)",
@@ -97,10 +97,10 @@ const copy = {
     barCount: "Completed bars",
     dataRange: "Imported data range",
     pythonEngine: "Engine / worker protocol",
-    workerImage: "Digest-pinned worker image",
+    workerImage: "Pinned isolated worker",
     pythonReviewScope: "Review hash",
     pythonWorkerMissing: "The isolated Python worker is not configured; this upload cannot run yet.",
-    pythonRunHint: "For the current PAPER flow use instrument AAPL, quantity 1, LIMIT $400, then fetch bars with the IBKR PAPER button. The server binds a short-lived proof to that exact CSV and session schedule; provider labels entered by hand cannot qualify a version. A compatible report must emit exactly one unfilled BUY 1 AAPL limit order.",
+    pythonRunHint: "Choose a supported instrument, whole-share quantity and order policy, then fetch bars with the IBKR PAPER button. The server binds proof to the exact CSV and session schedule. The separate one-shot test has its own AAPL BUY 1 LIMIT $400 restrictions.",
     pythonNoFiles: "Choose all three files and provide the metadata before running.",
     pythonRunSuccess: "Saved Python Backtrader report",
     pythonVersion: "Immutable strategy version",
@@ -114,6 +114,8 @@ const copy = {
     paperCompositionIncomplete: "A runtime factory is registered, but trusted strategy, authorization, account, market-data, or risk wiring is incomplete.",
     paperStopped: "Runtime composition is configured but stopped. The dispatch gate is closed.",
     paperPaused: "Runtime is paused. The dispatch gate is closed.",
+    paperScheduleFailed: "Daily data could not be advanced safely. Check Gateway and reconcile before restarting.",
+    paperWindowExpired: "The entry window ended. New orders are paused; existing orders can still be managed.",
     paperRunning: "Runtime is active and its dispatch gate is open.",
     paperStartButton: "Connect and reconcile (paused)",
     paperStartHint: "Connects the pinned PAPER strategy and reconciles account facts. Dispatch stays paused.",
@@ -121,6 +123,11 @@ const copy = {
     paperActivateHint: "Allows this frozen strategy to submit orders to the IBKR PAPER account.",
     paperControlBusy: "Updating PAPER runtime…",
     paperControlFailure: "PAPER control did not complete. Refresh status before retrying.",
+    paperDraftRequiresRestart: "Stop the paused draft session and prepare a fresh backtest before starting again.",
+    paperStopButton: "Stop PAPER session",
+    paperStopRetry: "Retry stopping PAPER session",
+    paperStopWaiting: "Stopping is waiting for orders or callbacks. The account remains connected and new orders are blocked.",
+    paperStopHint: "Stops new orders and disconnects once the session is safe to close. Working orders are not automatically cancelled.",
     paperPauseButton: "Pause new orders",
     paperPauseHint: "Keeps broker callbacks and reconciliation running; does not cancel open orders.",
     paperPauseFailure: "The runtime did not confirm a durable pause. Check status before retrying.",
@@ -128,10 +135,35 @@ const copy = {
     paperUserGuide: "Open PAPER user guide (Chinese)",
     paperSignalDateHint: "At execution, the backtest evaluation date must match the latest completed IBKR session. If it has advanced, fetch bars, backtest, and select a new version.",
     paperCandidatesTitle: "Frozen Backtest Versions",
-    paperCandidatesDescription: "Select a frozen Python strategy only when its verified IBKR Backtrader run proves the exact AAPL BUY 1 LMT $400 order. Selection does not submit an order.",
+    paperFrozenQuantity: "Frozen quantity",
+    paperPreviewSide: "Order direction",
+    paperPreviewButton: "Check order evidence",
+    paperSetupToggle: "Check entry window and risk limits",
+    paperSuggestWindow: "Use current or next market session",
+    paperSuggestWindowFailed: "Could not determine the next market session.",
+    paperSaveDraft: "Save PAPER draft",
+    paperLoadDraft: "Restore PAPER draft",
+    paperDeployDraft: "Deploy saved PAPER draft",
+    paperDeploying: "Preparing strategy history…",
+    paperConnectGateway: "Check PAPER Gateway connection",
+    paperGatewayChecked: "PAPER account verified (read-only check)",
+    paperGatewayCheckFailed: "Could not verify one local PAPER account. Log in to Gateway and enable its API, then retry.",
+    paperDeployGrantHint: "Deploying authorizes this operator to start within the selected window and to manage its PAPER orders afterward. It does not start the session.",
+    paperRunDraft: "Start PAPER and process initial signal",
+    paperRunDraftQueued: "Initial signal queued. Later daily signals are checked during the selected window while this session remains running. Check order and reconciliation status; no broker confirmation is implied.",
+    paperDraftDeployed: "Draft deployed. The session has not started and no order was sent.",
+    paperDraftSaved: "Draft saved. It is not deployed and cannot submit orders.",
+    paperDraftMissing: "No saved draft or its evidence is unavailable.",
+    paperDraftRestored: "Restored draft for run",
+    paperSetupHint: "Preview checks the session and limit amount, not live risk or market-order value. Times need a timezone; choose up to 90 days with both endpoints in regular market sessions. Saving does not activate these settings.",
+    paperSetupFields: ["Entry start", "Entry end", "Max order USD", "Max gross USD", "Strategy budget USD", "Max daily loss USD", "Max orders per session"],
+    paperPreviewReady: "Evidence matches; live risk has not been checked and this order cannot be submitted yet.",
+    paperPreviewFailed: "Order evidence could not be verified",
+    paperCandidatesDescription: "For a PAPER draft, check the order evidence and save the draft below. The separate fixed one-shot test only accepts AAPL BUY 1 LMT $400.",
+    paperFixedReasons: "Why the fixed AAPL one-shot test is unavailable",
     paperCandidateReady: "Current fixed PAPER version",
-    paperCandidateSelectable: "Compatible with this PAPER order",
-    paperCandidateBacktestOnly: "Verified backtest · no PAPER deployment",
+    paperCandidateSelectable: "Compatible with fixed one-shot test",
+    paperCandidateBacktestOnly: "Verified backtest · check draft eligibility below",
     paperCandidateSelect: "Use for this PAPER check",
     paperCandidateSelecting: "Updating strategy…",
     paperCandidateSelectError: "Strategy selection failed. The prior PAPER deployment was preserved.",
@@ -152,6 +184,10 @@ const copy = {
     paperIntegrationNoOrder: "No broker order was observed during the response window.",
     paperActivityTitle: "Persisted PAPER activity",
     paperActivityStopped: "Runtime stopped: showing saved order history. Reconnect and reconcile to see current broker positions.",
+    paperCancelRecovery: "Reconnect to manage working PAPER orders",
+    paperCancelRecoveryHint: "Reconnects in paused mode and reconciles known orders; it does not activate the strategy.",
+    paperRestoreDeployment: "Restore saved PAPER deployment",
+    paperRestoreDeploymentHint: "Restore the saved deployment first, then reconnect to manage its working orders.",
     paperActivityConnecting: "Connecting live activity updates…",
     paperActivityLive: "Live activity updates connected",
     paperActivityStale: "Live updates interrupted; reconnecting. Periodic snapshots continue.",
@@ -165,6 +201,8 @@ const copy = {
     paperCancelling: "Sending cancellation…",
     paperCancelSent: "Cancellation requested; check the broker status for confirmation.",
     paperCancelError: "Cancellation was not confirmed. Check the order and your cancel grant before retrying.",
+    paperCancelState: "Cancellation status",
+    paperCancelStates: { SEND_STARTED: "Requested, awaiting broker confirmation", UNKNOWN: "Outcome unknown; reconcile before taking further action", CONFIRMED: "Confirmed by broker", REJECTED: "Rejected by broker; review the working order in Gateway" },
     paperFilled: "filled",
     paperRemaining: "remaining",
     paperPositionTitle: "Broker positions",
@@ -250,7 +288,7 @@ const copy = {
     openRun: "Open saved run",
   },
   zh: {
-    eyebrow: "执行实验室 / 离线",
+    eyebrow: "PAPER 模拟盘 · 禁止实盘交易",
     title: "逐根 bar 验证 Backtrader。",
     intro: "使用行情 provider 或当前选择的 IBKR 本地只读连接，运行受信任的 SMA/RSI 模板。回测不会启动券商策略或下单。",
     engine: "执行后端",
@@ -287,7 +325,7 @@ const copy = {
     python: "上传 Python",
     pythonDetail: "上传策略可冻结并离线回测。若 Python 版本的 IBKR 回测报告证明它会发出本次授权的 AAPL 订单，就可选入单笔 PAPER 流程；券商执行仍由操作员单独触发。",
     pythonUploadTitle: "运行隔离的 Python 上传策略",
-    pythonUploadDescription: "上传 Python 文件、完整日线 CSV 和交易时段 JSON。在 Backtrader 报告中冻结股数及 MARKET/LIMIT 策略；符合条件的 IBKR PAPER 报告才可选入固定 AAPL 单笔联调。",
+    pythonUploadDescription: "上传 Python 文件、完整日线 CSV 和交易时段 JSON，在 Backtrader 报告中冻结标的、股数及 MARKET/LIMIT 策略。符合条件的报告可用于核对 PAPER 草稿；固定 AAPL 单笔联调是单独的入口。",
     pythonPositionQuantity: "明确整股数量",
     pythonOrderType: "回测订单类型",
     pythonLimitPrice: "限价（USD）",
@@ -338,10 +376,10 @@ const copy = {
     barCount: "完整日线数",
     dataRange: "导入数据范围",
     pythonEngine: "引擎 / worker 协议",
-    workerImage: "固定摘要的 worker 镜像",
+    workerImage: "固定版本的隔离 worker",
     pythonReviewScope: "预览校验值",
     pythonWorkerMissing: "隔离 Python worker 尚未配置，当前无法运行该上传策略。",
-    pythonRunHint: "当前 PAPER 流程请使用标的 AAPL、数量 1、LIMIT $400，再通过 IBKR PAPER 按钮获取日线。服务端会把短时凭证绑定到这份 CSV 和交易日程；手动填写行情来源标签不能让版本获得部署资格。符合条件的报告须恰好产生一笔未成交 AAPL BUY 1 限价单。",
+    pythonRunHint: "选择受支持的标的、整股数量和订单规则，再通过 IBKR PAPER 按钮获取日线。服务端凭证绑定这份 CSV 和交易日程；手动填写行情来源标签不能让版本获得部署资格。单独的固定单笔联调仍限定 AAPL 买入 1 股、限价 $400。",
     pythonNoFiles: "请选择三个文件并填写所需元信息。",
     pythonRunSuccess: "已保存 Python Backtrader 报告",
     pythonVersion: "不可变策略版本",
@@ -355,6 +393,8 @@ const copy = {
     paperCompositionIncomplete: "Runtime factory 已注册，但策略、授权、账户、行情或风控接线尚不完整。",
     paperStopped: "Runtime composition 已配置但处于停止状态，派单闸门关闭。",
     paperPaused: "Runtime 已暂停，派单闸门关闭。",
+    paperScheduleFailed: "后续日线无法继续处理，请检查 Gateway 并完成对账后再重新启动。",
+    paperWindowExpired: "开仓窗口已结束，新增订单已暂停；仍可管理已有委托。",
     paperRunning: "Runtime 正在运行，派单闸门已打开。",
     paperStartButton: "连接并对账（保持暂停）",
     paperStartHint: "连接已冻结的 PAPER 策略并对账账户事实；此步骤不会开放派单。",
@@ -362,6 +402,11 @@ const copy = {
     paperActivateHint: "允许这个已冻结策略向 IBKR PAPER 账户提交订单。",
     paperControlBusy: "正在更新 PAPER runtime…",
     paperControlFailure: "PAPER 控制操作未完成。请刷新状态后再决定是否重试。",
+    paperDraftRequiresRestart: "请先停止已暂停的草稿会话，并准备新的回测后再启动。",
+    paperStopButton: "停止模拟盘会话",
+    paperStopRetry: "重试停止模拟盘会话",
+    paperStopWaiting: "正在等待订单或回报处理完成；账户仍保持连接，新增订单已停止。",
+    paperStopHint: "停止新增订单，在会话可以安全关闭后断开连接；已有委托不会自动撤销。",
     paperPauseButton: "暂停新增派单",
     paperPauseHint: "继续处理券商回报与对账；不会撤销已有委托。",
     paperPauseFailure: "Runtime 未确认持久暂停。请先检查状态，再决定是否重试。",
@@ -369,10 +414,35 @@ const copy = {
     paperUserGuide: "打开 PAPER 使用手册",
     paperSignalDateHint: "执行时，回测评估日必须与 IBKR 最新完整交易日一致；若已变化，请重新拉取日线、回测并选择新版本。",
     paperCandidatesTitle: "已冻结的回测版本",
-    paperCandidatesDescription: "只有冻结策略的 IBKR Backtrader 报告证明会发出本次限定的 AAPL 买入 1 股、$400 限价单时，才可选作联调版本。选择不会下单。",
+    paperFrozenQuantity: "冻结股数",
+    paperPreviewSide: "订单方向",
+    paperPreviewButton: "核对订单证据",
+    paperSetupToggle: "核对开仓时段和风险上限",
+    paperSuggestWindow: "使用当前或下一个交易时段",
+    paperSuggestWindowFailed: "无法确定下一个交易时段。",
+    paperSaveDraft: "保存 PAPER 草稿",
+    paperLoadDraft: "恢复 PAPER 草稿",
+    paperDeployDraft: "部署已保存的 PAPER 草稿",
+    paperDeploying: "正在准备策略历史数据…",
+    paperConnectGateway: "检查 PAPER Gateway 连接",
+    paperGatewayChecked: "已核验 PAPER 账户（只读检查）",
+    paperGatewayCheckFailed: "无法核验唯一的本机 PAPER 账户，请登录 Gateway 并启用 API 后重试。",
+    paperDeployGrantHint: "部署后，当前操作员可在所选时段内启动，并在时段结束后管理该 PAPER 部署的订单；部署本身不会启动会话。",
+    paperRunDraft: "启动 PAPER 并处理初始信号",
+    paperRunDraftQueued: "初始信号已交给策略处理；会话运行期间，所选窗口内会检查后续日线。请查看订单及对账状态，信号投递不代表券商已确认。",
+    paperDraftDeployed: "草稿已部署，会话尚未启动，也没有发出订单。",
+    paperDraftSaved: "草稿已保存，尚未部署，不能提交订单。",
+    paperDraftMissing: "没有已保存草稿，或其回测证据不可用。",
+    paperDraftRestored: "已恢复草稿，回测编号",
+    paperSetupHint: "预览校验交易时段和限价单金额，不检查实时账户风险或市价单金额。时间须含时区；可选择最多 90 天，起止时间须在美股常规交易时段内。保存草稿不会启用设置。",
+    paperSetupFields: ["开仓开始", "开仓结束", "单笔上限 USD", "总持仓上限 USD", "策略预算 USD", "单日亏损上限 USD", "每交易日订单上限"],
+    paperPreviewReady: "证据匹配；尚未检查实时风控，目前不能提交订单。",
+    paperPreviewFailed: "订单证据核验失败",
+    paperCandidatesDescription: "通用模拟盘请在下方核对订单证据并保存草稿。单独的固定单笔联调只接受 AAPL 买入 1 股、限价 $400。",
+    paperFixedReasons: "不符合固定 AAPL 单笔联调的原因",
     paperCandidateReady: "当前固定 PAPER 版本",
-    paperCandidateSelectable: "符合本次 PAPER 订单限制",
-    paperCandidateBacktestOnly: "回测已验证 · 暂无 PAPER 部署",
+    paperCandidateSelectable: "符合固定单笔联调",
+    paperCandidateBacktestOnly: "回测已验证 · 请在下方核对草稿资格",
     paperCandidateSelect: "用于本次 PAPER 联调",
     paperCandidateSelecting: "正在切换策略…",
     paperCandidateSelectError: "策略切换失败，原 PAPER 部署保持不变。",
@@ -393,6 +463,10 @@ const copy = {
     paperIntegrationNoOrder: "等待窗口内没有观察到券商订单。",
     paperActivityTitle: "已持久化的 PAPER 活动",
     paperActivityStopped: "运行已停止：当前显示已保存的订单历史。请重新连接并对账以查看券商当前持仓。",
+    paperCancelRecovery: "重新连接以管理未完成的 PAPER 委托",
+    paperCancelRecoveryHint: "重新连接并对账已有委托，会话保持暂停，不会启动策略。",
+    paperRestoreDeployment: "恢复已保存的 PAPER 部署",
+    paperRestoreDeploymentHint: "先恢复已保存的部署，再重新连接以管理未完成的委托。",
     paperActivityConnecting: "正在连接实时活动更新…",
     paperActivityLive: "实时活动更新已连接",
     paperActivityStale: "实时更新中断，正在重连；页面仍会定期刷新快照。",
@@ -406,6 +480,8 @@ const copy = {
     paperCancelling: "正在发送撤单请求…",
     paperCancelSent: "撤单请求已发送；请查看券商状态确认结果。",
     paperCancelError: "撤单未确认，请先检查订单状态及撤单授权。",
+    paperCancelState: "撤单状态",
+    paperCancelStates: { SEND_STARTED: "已请求，等待券商确认", UNKNOWN: "结果未知；请先对账", CONFIRMED: "券商已确认", REJECTED: "券商已拒绝；请在 Gateway 检查活动订单" },
     paperFilled: "已成交",
     paperRemaining: "剩余",
     paperPositionTitle: "券商持仓",
@@ -632,7 +708,7 @@ export function Execution() {
   const [paperPauseBusy, setPaperPauseBusy] = useState(false);
   const [paperPauseError, setPaperPauseError] = useState(false);
   const [paperControlBusy, setPaperControlBusy] = useState(false);
-  const [paperControlError, setPaperControlError] = useState(false);
+  const [paperControlError, setPaperControlError] = useState("");
   const [paperIntegrationTest, setPaperIntegrationTest] = useState<PaperIntegrationTestStatus | null>(null);
   const [paperIntegrationBusy, setPaperIntegrationBusy] = useState(false);
   const [paperIntegrationError, setPaperIntegrationError] = useState<"generic" | "signal_date" | null>(null);
@@ -640,6 +716,16 @@ export function Execution() {
   const [paperStrategyCandidates, setPaperStrategyCandidates] = useState<PaperStrategyCandidatesResponse | null>(null);
   const [paperCandidateSelecting, setPaperCandidateSelecting] = useState<string | null>(null);
   const [paperCandidateSelectError, setPaperCandidateSelectError] = useState(false);
+  const [paperPreviewSide, setPaperPreviewSide] = useState<"BUY" | "SELL">("BUY");
+  const [paperSetupEnabled, setPaperSetupEnabled] = useState(false);
+  const [paperSetupValues, setPaperSetupValues] = useState(["", "", "1000", "10000", "5000", "500", "5"]);
+  const [paperDraftMessage, setPaperDraftMessage] = useState<string | null>(null);
+  const [paperDeployBusy, setPaperDeployBusy] = useState(false);
+  const [paperGatewayMessage, setPaperGatewayMessage] = useState<string | null>(null);
+  const [paperGatewayBusy, setPaperGatewayBusy] = useState(false);
+  const paperGatewayAutoChecked = useRef(false);
+  const [paperPreviewBusy, setPaperPreviewBusy] = useState<string | null>(null);
+  const [paperPreviewResult, setPaperPreviewResult] = useState<{ id: string; runId: string; message: string; ok: boolean } | null>(null);
 
   useEffect(() => {
     onPaperActivityStatusChange(setPaperActivityStreamStatus);
@@ -674,15 +760,14 @@ export function Execution() {
             }).catch(() => {
               if (active) setPaperIntegrationTest(null);
             });
-            api.getPaperStrategyCandidates().then((candidates) => {
-              if (active) setPaperStrategyCandidates(candidates);
-            }).catch(() => {
-              if (active) setPaperStrategyCandidates(null);
-            });
           } else {
             setPaperIntegrationTest(null);
-            setPaperStrategyCandidates(null);
           }
+          api.getPaperStrategyCandidates().then((candidates) => {
+            if (active) setPaperStrategyCandidates(candidates);
+          }).catch(() => {
+            if (active) setPaperStrategyCandidates(null);
+          });
         }
       }).catch(() => {
         if (active) setPaperRuntimeUnavailable(true);
@@ -745,14 +830,14 @@ export function Execution() {
     const versionId = paperRuntime?.strategy_version_id;
     if (!versionId) return;
     setPaperControlBusy(true);
-    setPaperControlError(false);
+    setPaperControlError("");
     try {
       const status = await api.startPaperExecution(versionId);
       setPaperRuntime(status);
       setPaperRuntimeUnavailable(false);
       refreshPaperActivityRef.current();
-    } catch {
-      setPaperControlError(true);
+    } catch (error) {
+      setPaperControlError(error instanceof ApiError ? error.message : text.paperControlFailure);
     } finally {
       setPaperControlBusy(false);
     }
@@ -760,14 +845,29 @@ export function Execution() {
 
   const activatePaperExecution = async () => {
     setPaperControlBusy(true);
-    setPaperControlError(false);
+    setPaperControlError("");
     try {
       const status = await api.activatePaperExecution();
       setPaperRuntime(status);
       setPaperRuntimeUnavailable(false);
       refreshPaperActivityRef.current();
-    } catch {
-      setPaperControlError(true);
+    } catch (error) {
+      setPaperControlError(error instanceof ApiError && error.code === "paper_draft_requires_restart" ? text.paperDraftRequiresRestart : error instanceof ApiError ? error.message : text.paperControlFailure);
+    } finally {
+      setPaperControlBusy(false);
+    }
+  };
+
+  const stopPaperExecution = async () => {
+    setPaperControlBusy(true);
+    setPaperControlError("");
+    try {
+      const status = await api.stopPaperExecution();
+      setPaperRuntime(status);
+      setPaperRuntimeUnavailable(false);
+      refreshPaperActivityRef.current();
+    } catch (error) {
+      setPaperControlError(error instanceof ApiError ? error.message : text.paperControlFailure);
     } finally {
       setPaperControlBusy(false);
     }
@@ -814,11 +914,26 @@ export function Execution() {
     }
   };
 
-  const selectPaperStrategyCandidate = async (strategyVersionId: string) => {
+  const startPaperCancelRecovery = async () => {
+    setPaperControlBusy(true);
+    setPaperControlError("");
+    try {
+      const status = await api.startPaperCancelRecovery();
+      setPaperRuntime(status);
+      setPaperRuntimeUnavailable(false);
+      refreshPaperActivityRef.current();
+    } catch (error) {
+      setPaperControlError(error instanceof ApiError ? error.message : text.paperControlFailure);
+    } finally {
+      setPaperControlBusy(false);
+    }
+  };
+
+  const selectPaperStrategyCandidate = async (strategyVersionId: string, runId: string) => {
     setPaperCandidateSelecting(strategyVersionId);
     setPaperCandidateSelectError(false);
     try {
-      await api.selectPaperStrategyCandidate(strategyVersionId);
+      await api.selectPaperStrategyCandidate(strategyVersionId, runId);
       const [runtimeStatus, integrationStatus, candidates] = await Promise.all([
         api.getPaperExecutionStatus(),
         api.getPaperIntegrationTestStatus(),
@@ -832,6 +947,116 @@ export function Execution() {
       setPaperCandidateSelectError(true);
     } finally {
       setPaperCandidateSelecting(null);
+    }
+  };
+
+  const previewPaperOrder = async (candidate: PaperStrategyCandidatesResponse["items"][number]) => {
+    if (!candidate.frozen_quantity || candidate.instrument_ids.length !== 1) return;
+    setPaperPreviewBusy(candidate.strategy_version_id);
+    setPaperPreviewResult(null);
+    try {
+      const result = await api.previewPaperOrder({
+        run_id: candidate.run_id, strategy_version_id: candidate.strategy_version_id,
+        ...(paperSetupEnabled ? { setup: { valid_from: paperSetupValues[0], valid_until: paperSetupValues[1],
+          max_order_notional: paperSetupValues[2], max_gross_exposure: paperSetupValues[3],
+          strategy_budget: paperSetupValues[4], max_daily_loss: paperSetupValues[5],
+          max_orders_per_session: Number(paperSetupValues[6]) } } : {}),
+        order: { instrument_id: candidate.instrument_ids[0], side: paperPreviewSide,
+          integer_qty: candidate.frozen_quantity, order_type: candidate.execution_order_type,
+          time_in_force: candidate.execution_time_in_force,
+          limit_price: candidate.execution_order_type === "limit" ? candidate.frozen_limit_price ?? null : null },
+      });
+      setPaperPreviewResult({ id: candidate.strategy_version_id, runId: candidate.run_id, ok: true,
+        message: `${text.paperPreviewReady} ${result.contract.symbol} · conId ${result.contract.con_id} · ${result.contract.primary_exchange}` });
+    } catch (error) {
+      setPaperPreviewResult({ id: candidate.strategy_version_id, runId: candidate.run_id, ok: false,
+        message: `${text.paperPreviewFailed}: ${error instanceof ApiError ? error.message : text.unknown}` });
+    } finally {
+      setPaperPreviewBusy(null);
+    }
+  };
+
+  const savePaperDraft = async (candidate: PaperStrategyCandidatesResponse["items"][number]) => {
+    if (!candidate.frozen_quantity || candidate.instrument_ids.length !== 1) return;
+    try {
+      await api.savePaperOrderDraft({ run_id: candidate.run_id, strategy_version_id: candidate.strategy_version_id,
+        order: { instrument_id: candidate.instrument_ids[0], side: paperPreviewSide, integer_qty: candidate.frozen_quantity,
+          order_type: candidate.execution_order_type, time_in_force: candidate.execution_time_in_force,
+          limit_price: candidate.execution_order_type === "limit" ? candidate.frozen_limit_price ?? null : null },
+        setup: { valid_from: paperSetupValues[0], valid_until: paperSetupValues[1], max_order_notional: paperSetupValues[2],
+          max_gross_exposure: paperSetupValues[3], strategy_budget: paperSetupValues[4], max_daily_loss: paperSetupValues[5],
+          max_orders_per_session: Number(paperSetupValues[6]) } });
+      setPaperDraftMessage(text.paperDraftSaved);
+    } catch (error) { setPaperDraftMessage(`${text.paperDraftMissing}${error instanceof ApiError ? `: ${error.message}` : ""}`); }
+  };
+
+  const suggestPaperWindow = async () => {
+    try {
+      const window = await api.suggestPaperWindow();
+      setPaperSetupValues((values) => [window.valid_from, window.valid_until, ...values.slice(2)]);
+      setPaperPreviewResult(null);
+      setPaperDraftMessage("");
+    } catch {
+      setPaperDraftMessage(text.paperSuggestWindowFailed);
+    }
+  };
+
+  const restorePaperDraft = async () => {
+    try {
+      const { draft } = await api.getPaperOrderDraft();
+      if (!draft) throw new Error("draft unavailable");
+      const setup = draft.setup;
+      setPaperSetupValues([setup.valid_from, setup.valid_until, setup.max_order_notional, setup.max_gross_exposure,
+        setup.strategy_budget, setup.max_daily_loss, String(setup.max_orders_per_session)]);
+      setPaperSetupEnabled(true);
+      setPaperPreviewSide(draft.order.side);
+      setPaperDraftMessage(`${text.paperDraftRestored}: ${draft.run_id} · ${draft.order.instrument_id} · ${draft.order.integer_qty}`);
+    } catch { setPaperDraftMessage(text.paperDraftMissing); }
+  };
+
+  const deployPaperDraft = async () => {
+    setPaperDeployBusy(true);
+    try {
+      await api.deployPaperOrderDraft();
+      setPaperRuntime(await api.getPaperExecutionStatus());
+      setPaperIntegrationTest(null);
+      setPaperDraftMessage(text.paperDraftDeployed);
+      refreshPaperActivityRef.current();
+    } catch (error) {
+      setPaperDraftMessage(`${text.paperCandidateSelectError}${error instanceof ApiError ? `: ${error.message}` : ""}`);
+    } finally {
+      setPaperDeployBusy(false);
+    }
+  };
+
+  const connectPaperGateway = async () => {
+    setPaperGatewayBusy(true);
+    try {
+      const result = await api.connectLocalPaperGateway();
+      setPaperGatewayMessage(`${text.paperGatewayChecked}: ${result.account_ref} · ${result.connection}`);
+      setPaperRuntime(await api.getPaperExecutionStatus());
+      refreshPaperActivityRef.current();
+    } catch {
+      setPaperGatewayMessage(text.paperGatewayCheckFailed);
+    } finally {
+      setPaperGatewayBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!paperGatewayAutoChecked.current) {
+      paperGatewayAutoChecked.current = true;
+      void connectPaperGateway();
+    }
+  }, []);
+
+  const runPaperDraft = async () => {
+    try {
+      await api.runPaperOrderDraft();
+      setPaperRuntime(await api.getPaperExecutionStatus());
+      setPaperDraftMessage(text.paperRunDraftQueued);
+    } catch (error) {
+      setPaperDraftMessage(`${text.paperCandidateSelectError}${error instanceof ApiError ? `: ${error.message}` : ""}`);
     }
   };
 
@@ -858,6 +1083,16 @@ export function Execution() {
     description: t(`execution.paperRequirement.${requirement}`, { defaultValue: requirement }),
   }));
 
+  const desktopPaperPort = async (): Promise<4002 | 7497> => {
+    const detected = await api.connectLocalPaperGateway();
+    if (!detected.verified || detected.environment !== "paper" || !detected.read_only_check) {
+      throw new Error(text.paperGatewayCheckFailed);
+    }
+    if (detected.connection === "Gateway") return 4002;
+    if (detected.connection === "TWS") return 7497;
+    throw new Error(text.paperGatewayCheckFailed);
+  };
+
   const currentBacktestPayload = () => ({
     symbol: symbol.trim(),
     instrument_id: instrumentId.trim(),
@@ -883,6 +1118,12 @@ export function Execution() {
     setPythonResult(null);
     try {
       const payload = currentBacktestPayload();
+      if (window.vibeDesktop?.isDesktop && source === "ibkr") {
+        const port = await desktopPaperPort();
+        if (generation !== previewGenerationRef.current) return;
+        payload.ibkr_profile_id = "ibkr-paper-local";
+        payload.ibkr_port = port;
+      }
       const preview = await api.previewExecutionBacktest(payload);
       if (generation === previewGenerationRef.current) {
         setReview({ payload, preview, transcript: preview.clarification_transcript });
@@ -1016,11 +1257,12 @@ export function Execution() {
     setPythonResult(null);
     setResult(null);
     try {
+      const port = window.vibeDesktop?.isDesktop ? await desktopPaperPort() : pythonIbkrPort;
       const fetched = await api.previewIbkrPythonMarketData({
         symbol: pythonIbkrSymbol.trim(),
         instrument_id: pythonInstrumentId.trim(),
-        profile_id: pythonIbkrProfileId,
-        port: pythonIbkrPort,
+        profile_id: window.vibeDesktop?.isDesktop ? "ibkr-paper-local" : pythonIbkrProfileId,
+        port,
         warmup_start: metadata.warmupStart,
         warmup_end: metadata.warmupEnd,
         evaluation_start: metadata.evaluationStart,
@@ -1187,7 +1429,7 @@ export function Execution() {
             <label className="text-xs font-medium">{text.symbol}<input className={fieldClass} value={symbol} onChange={(event) => setSymbol(event.target.value)} maxLength={32} required /></label>
             <label className="text-xs font-medium">{text.instrument}<input className={fieldClass} value={instrumentId} onChange={(event) => setInstrumentId(event.target.value)} maxLength={64} required /></label>
             <label className="text-xs font-medium">{text.source}<select className={fieldClass} value={source} onChange={(event) => setSource(event.target.value as "yfinance" | "stooq" | "ibkr")}><option value="yfinance">Yahoo Finance via yfinance</option><option value="stooq">Stooq</option><option value="ibkr">{text.ibkrSource}</option></select></label>
-            {source === "ibkr" ? <>
+            {source === "ibkr" && !window.vibeDesktop?.isDesktop ? <>
               <label className="text-xs font-medium">IBKR profile<select className={fieldClass} value={ibkrProfileId} onChange={(event) => { const next = event.target.value as typeof ibkrProfileId; setIbkrProfileId(next); setIbkrPort(next === "ibkr-paper-local" ? 4002 : 4001); }}><option value="ibkr-paper-local">{text.ibkrPaperProfile}</option><option value="ibkr-live-local-readonly">{text.ibkrLiveProfile}</option></select></label>
               <label className="text-xs font-medium">{text.ibkrPort}<select className={fieldClass} value={ibkrPort} onChange={(event) => setIbkrPort(Number(event.target.value) as typeof ibkrPort)}>{ibkrProfileId === "ibkr-paper-local" ? <><option value={4002}>IB Gateway PAPER · 4002</option><option value={7497}>TWS PAPER · 7497</option></> : <><option value={4001}>IB Gateway LIVE · 4001 (read-only)</option><option value={7496}>TWS LIVE · 7496 (read-only)</option></>}</select></label>
             </> : null}
@@ -1359,8 +1601,8 @@ export function Execution() {
             <label className="text-xs font-medium">{text.strategyId}<input className={fieldClass} value={pythonStrategyId} maxLength={64} onChange={(event) => setPythonStrategyId(event.target.value)} required /></label>
             <label className="text-xs font-medium">{text.instrument}<input className={fieldClass} value={pythonInstrumentId} maxLength={64} onChange={(event) => setPythonInstrumentId(event.target.value)} required /></label>
             <label className="text-xs font-medium">{text.ibkrSymbol}<input className={fieldClass} value={pythonIbkrSymbol} maxLength={32} onChange={(event) => setPythonIbkrSymbol(event.target.value)} required /></label>
-            <label className="text-xs font-medium">{text.ibkrProfile}<select className={fieldClass} value={pythonIbkrProfileId} onChange={(event) => { const next = event.target.value as typeof pythonIbkrProfileId; setPythonIbkrProfileId(next); setPythonIbkrPort(next === "ibkr-paper-local" ? 4002 : 4001); }}><option value="ibkr-paper-local">IBKR PAPER (DU account)</option><option value="ibkr-live-local-readonly">IBKR LIVE (read-only)</option></select></label>
-            <label className="text-xs font-medium">{text.ibkrPort}<select className={fieldClass} value={pythonIbkrPort} onChange={(event) => setPythonIbkrPort(Number(event.target.value) as typeof pythonIbkrPort)}>{pythonIbkrProfileId === "ibkr-paper-local" ? <><option value={4002}>IB Gateway PAPER · 4002</option><option value={7497}>TWS PAPER · 7497</option></> : <><option value={4001}>IB Gateway LIVE · 4001 (read-only)</option><option value={7496}>TWS LIVE · 7496 (read-only)</option></>}</select></label>
+            {!window.vibeDesktop?.isDesktop && <><label className="text-xs font-medium">{text.ibkrProfile}<select className={fieldClass} value={pythonIbkrProfileId} onChange={(event) => { const next = event.target.value as typeof pythonIbkrProfileId; setPythonIbkrProfileId(next); setPythonIbkrPort(next === "ibkr-paper-local" ? 4002 : 4001); }}><option value="ibkr-paper-local">IBKR PAPER (DU account)</option><option value="ibkr-live-local-readonly">IBKR LIVE (read-only)</option></select></label>
+            <label className="text-xs font-medium">{text.ibkrPort}<select className={fieldClass} value={pythonIbkrPort} onChange={(event) => setPythonIbkrPort(Number(event.target.value) as typeof pythonIbkrPort)}>{pythonIbkrProfileId === "ibkr-paper-local" ? <><option value={4002}>IB Gateway PAPER · 4002</option><option value={7497}>TWS PAPER · 7497</option></> : <><option value={4001}>IB Gateway LIVE · 4001 (read-only)</option><option value={7496}>TWS LIVE · 7496 (read-only)</option></>}</select></label></>}
             <label className="text-xs font-medium">{text.pythonPositionQuantity}<input className={fieldClass} type="number" min="1" max="100000" step="1" value={pythonPositionQuantity} onChange={(event) => setPythonPositionQuantity(Number(event.target.value))} required /></label>
             <label className="text-xs font-medium">{text.pythonOrderType}<select className={fieldClass} value={pythonExecutionOrderType} onChange={(event) => setPythonExecutionOrderType(event.target.value as "market" | "limit")}><option value="market">MARKET · DAY</option><option value="limit">LIMIT · DAY</option></select></label>
             {pythonExecutionOrderType === "limit" && <label className="text-xs font-medium">{text.pythonLimitPrice}<input className={fieldClass} type="number" min="0.01" step="0.01" value={pythonLimitPriceUsd} onChange={(event) => setPythonLimitPriceUsd(event.target.value)} required /></label>}
@@ -1517,6 +1759,10 @@ export function Execution() {
                 <BoundaryRow title={text.python} detail={text.pythonDetail} state="OFFLINE ONLY" caution />
                 <BoundaryRow title={text.realData} detail={text.realDataDetail} state="SOURCE DEPENDENT" />
                 <BoundaryRow title={text.broker} detail={paperRuntimeDetail} state={paperRuntimeState} caution={paperRuntime?.dispatch_gate_open === true} />
+                {paperRuntime?.reason === "paper_daily_schedule_failed" && <p role="alert" className="mt-2 text-xs text-warning">{text.paperScheduleFailed}</p>}
+                {paperRuntime?.reason === "paper_entry_window_expired" && <p role="status" className="mt-2 text-xs text-muted-foreground">{text.paperWindowExpired}</p>}
+                <button type="button" className="mt-3 rounded border border-border px-2 py-1 text-xs disabled:opacity-50" disabled={paperGatewayBusy} onClick={() => void connectPaperGateway()}>{text.paperConnectGateway}</button>
+                {paperGatewayMessage && <p role="status" className="mt-2 text-xs text-muted-foreground">{paperGatewayMessage}</p>}
                 {paperRuntime?.last_error_code && (
                   <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3.5" role="status">
                     <div className="text-xs font-semibold text-destructive">{t("execution.paperLastErrorCode")}</div>
@@ -1541,6 +1787,19 @@ export function Execution() {
                   ) : (
                     <>
                       {paperActivity.control_reason === "runtime_stopped_broker_snapshot_unavailable" && <p className="mt-2 text-xs text-muted-foreground">{text.paperActivityStopped}</p>}
+                      {paperRuntime?.phase === "NOT_CONFIGURED" && paperActivity.recovery.active_orders > 0 && (
+                        <div className="mt-2">
+                          <p className="text-xs text-muted-foreground">{text.paperRestoreDeploymentHint}</p>
+                          <button type="button" className="mt-2 rounded border border-border px-2 py-1 text-xs disabled:opacity-50" disabled={paperDeployBusy} onClick={() => void deployPaperDraft()}>{paperDeployBusy ? text.paperDeploying : text.paperRestoreDeployment}</button>
+                          {paperDraftMessage && <p role="status" className="mt-2 text-xs text-muted-foreground">{paperDraftMessage}</p>}
+                        </div>
+                      )}
+                      {paperRuntime?.phase === "STOPPED" && paperActivity.recovery.active_orders > 0 && (
+                        <div className="mt-2">
+                          <p className="text-xs text-muted-foreground">{text.paperCancelRecoveryHint}</p>
+                          <button type="button" className="mt-2 rounded border border-border px-2 py-1 text-xs disabled:opacity-50" disabled={paperControlBusy} onClick={() => void startPaperCancelRecovery()}>{text.paperCancelRecovery}</button>
+                        </div>
+                      )}
                       <div className="mt-3 grid gap-3 sm:grid-cols-3">
                         <div className="rounded-md border border-border/50 p-3">
                           <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{text.paperPositionTitle}</div>
@@ -1584,7 +1843,8 @@ export function Execution() {
                                 {order.broker_order_id != null && (
                                   <p className="mt-1 text-[11px] text-muted-foreground">{text.paperBrokerOrderId}: {order.broker_order_id}</p>
                                 )}
-                                {paperRuntime?.owner_lease_held === true && (paperRuntime.phase === "READY" || paperRuntime.phase === "STOPPING") && (order.state === "ACKNOWLEDGED" || order.state === "PARTIALLY_FILLED") && (
+                                {order.cancel_state && <p className="mt-1 text-[11px] text-muted-foreground">{text.paperCancelState}: {text.paperCancelStates[order.cancel_state]}</p>}
+                                {!order.cancel_state && paperRuntime?.owner_lease_held === true && (paperRuntime.phase === "READY" || paperRuntime.phase === "STOPPING") && (order.state === "ACKNOWLEDGED" || order.state === "PARTIALLY_FILLED") && (
                                   <button type="button" className="mt-2 rounded-md border border-warning/50 px-2 py-1 text-xs text-warning disabled:opacity-50" disabled={paperCancelBusy !== null} onClick={() => void cancelPaperOrder(order.intent_id)}>
                                     {paperCancelBusy === order.intent_id ? text.paperCancelling : text.paperCancelOrder}
                                   </button>
@@ -1639,6 +1899,15 @@ export function Execution() {
                     {paperPauseError && <p className="mt-2 text-xs text-destructive" role="alert">{text.paperPauseFailure}</p>}
                   </div>
                 )}
+                {paperRuntime?.owner_lease_held === true && (paperRuntime.phase === "READY" || paperRuntime.phase === "STOPPING") && (
+                  <div className="mt-3 rounded-md border border-border/60 bg-muted/20 p-3.5">
+                    <button className="inline-flex h-9 items-center gap-2 rounded-md border border-border px-3 text-xs font-semibold hover:bg-muted disabled:opacity-60" type="button" onClick={stopPaperExecution} disabled={paperControlBusy}>
+                      {paperControlBusy && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+                      {paperRuntime.phase === "STOPPING" ? text.paperStopRetry : text.paperStopButton}
+                    </button>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{paperRuntime.phase === "STOPPING" ? text.paperStopWaiting : text.paperStopHint}</p>
+                  </div>
+                )}
                 {paperRuntime?.configured === true && paperRuntime.composition_ready &&
                   paperRuntime.phase === "STOPPED" && paperRuntime.strategy_version_id && (
                     <div className="mt-3 rounded-md border border-border/60 bg-muted/20 p-3.5">
@@ -1652,8 +1921,7 @@ export function Execution() {
                         {paperControlBusy ? text.paperControlBusy : text.paperStartButton}
                       </button>
                       <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{text.paperStartHint}</p>
-                      {paperControlError && <p className="mt-2 text-xs text-destructive" role="alert">{text.paperControlFailure}</p>}
-                    </div>
+                      </div>
                   )}
                 {paperRuntime?.configured === true && paperRuntime.composition_ready &&
                   paperRuntime.phase === "READY" && paperRuntime.control_state === "PAUSED" &&
@@ -1669,9 +1937,9 @@ export function Execution() {
                         {paperControlBusy ? text.paperControlBusy : text.paperActivateButton}
                       </button>
                       <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{text.paperActivateHint}</p>
-                      {paperControlError && <p className="mt-2 text-xs text-destructive" role="alert">{text.paperControlFailure}</p>}
-                    </div>
+                      </div>
                   )}
+                {paperControlError && <p className="mt-2 text-xs text-destructive" role="alert">{paperControlError}</p>}
                 {paperIntegrationTest?.configured === true && (
                   <div className="mt-3 rounded-lg border border-border/70 bg-background/70 p-4" aria-label={text.paperIntegrationTitle}>
                     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1720,16 +1988,37 @@ export function Execution() {
                     )}
                   </div>
                 )}
-                {paperRuntime?.configured === true && (
+                {(paperRuntime?.configured === true || paperActivity !== null) && (
                   <div className="mt-3 rounded-lg border border-border/70 bg-background/70 p-4" aria-label={text.paperCandidatesTitle}>
                     <h3 className="text-xs font-semibold">{text.paperCandidatesTitle}</h3>
                     <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">{text.paperCandidatesDescription}</p>
+                    <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">{text.paperDeployGrantHint}</p>
+                    <button type="button" className="mt-2 rounded border border-border px-2 py-1 text-xs" onClick={() => void restorePaperDraft()}>{text.paperLoadDraft}</button>
+                    <button type="button" className="ml-2 mt-2 rounded border border-border px-2 py-1 text-xs disabled:opacity-50" disabled={paperDeployBusy || (paperRuntime?.phase !== "STOPPED" && paperRuntime?.phase !== "NOT_CONFIGURED")} onClick={() => void deployPaperDraft()}>{paperDeployBusy ? text.paperDeploying : text.paperDeployDraft}</button>
+                    <button type="button" className="ml-2 mt-2 rounded border border-border px-2 py-1 text-xs disabled:opacity-50" disabled={paperRuntime?.phase !== "STOPPED"} onClick={() => void runPaperDraft()}>{text.paperRunDraft}</button>
+                    {paperDraftMessage && <p role="status" className="mt-2 text-xs text-muted-foreground">{paperDraftMessage}</p>}
+                    <label className="mt-2 flex items-center gap-2 text-xs">
+                      <input type="checkbox" checked={paperSetupEnabled} onChange={(event) => { setPaperSetupEnabled(event.target.checked); setPaperPreviewResult(null); }} />
+                      {text.paperSetupToggle}
+                    </label>
+                    {paperSetupEnabled && <div className="mt-2 space-y-2">
+                      <p className="text-xs text-muted-foreground">{text.paperSetupHint}</p>
+                      <button type="button" className="rounded border border-border px-2 py-1 text-xs" onClick={() => void suggestPaperWindow()}>{text.paperSuggestWindow}</button>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {text.paperSetupFields.map((label, index) => <label key={label} className="text-xs text-muted-foreground">
+                          {label}
+                          <input className="mt-1 block w-full rounded border border-border bg-background px-2 py-1" value={paperSetupValues[index]} onChange={(event) => {
+                            const next = [...paperSetupValues]; next[index] = event.target.value; setPaperSetupValues(next); setPaperPreviewResult(null);
+                          }} />
+                        </label>)}
+                      </div>
+                    </div>}
                     {!paperStrategyCandidates || paperStrategyCandidates.items.length === 0 ? (
                       <p className="mt-2 text-xs text-muted-foreground">{text.paperCandidatesEmpty}</p>
                     ) : (
                       <div className="mt-3 space-y-2">
                         {paperStrategyCandidates.items.map((candidate) => (
-                          <div key={candidate.strategy_version_id} className="rounded-md border border-border/50 p-3">
+                          <div key={`${candidate.strategy_version_id}:${candidate.run_id}`} className="rounded-md border border-border/50 p-3">
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <span className="text-xs font-semibold">{candidate.strategy_id}</span>
                               <span className={cn("rounded-full border px-2 py-0.5 text-[10px]", candidate.paper_deployable ? "border-success/40 bg-success/10 text-success" : "border-border text-muted-foreground")}>
@@ -1737,25 +2026,39 @@ export function Execution() {
                               </span>
                             </div>
                             <p className="mt-1.5 break-all font-mono text-[10px] text-muted-foreground">{candidate.strategy_version_id}</p>
+                            <p className="mt-1 break-all font-mono text-[10px] text-muted-foreground">{candidate.run_id}</p>
                             <p className="mt-1 text-[10px] text-muted-foreground">
                               {candidate.source_kind} · {candidate.instrument_ids.join(", ")} · {candidate.execution_order_type.toUpperCase()} · {candidate.position_mode}
                             </p>
+                            {candidate.frozen_quantity != null && <p className="mt-1 text-[10px] text-muted-foreground">{text.paperFrozenQuantity}: {candidate.frozen_quantity}</p>}
                             <p className="mt-1 text-[10px] text-muted-foreground">
                               {candidate.evaluation_start ?? "?"} — {candidate.evaluation_end ?? "?"} · {text.manifestHash}: {candidate.data_manifest_hash.slice(0, 16)}…
                             </p>
                             {!candidate.paper_deployable && candidate.paper_block_reasons.length > 0 && (
-                              <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-muted-foreground">
+                              <details className="mt-2 text-xs text-muted-foreground"><summary>{text.paperFixedReasons}</summary><ul className="mt-1 list-disc space-y-1 pl-4">
                                 {candidate.paper_block_reasons.map((reason) => (
                                   <li key={reason}>{paperCandidateReasons[reason]?.[i18n.resolvedLanguage?.startsWith("zh") ? 1 : 0] ?? reason}</li>
                                 ))}
-                              </ul>
+                              </ul></details>
                             )}
+                            {candidate.source_kind === "python_upload" && candidate.frozen_quantity != null && candidate.run_id !== "paper-integration-test" && (candidate.execution_order_type !== "limit" || candidate.frozen_limit_price != null) && (
+                              <div className="mt-2 flex flex-wrap items-end gap-2">
+                                <label className="text-xs text-muted-foreground">{text.paperPreviewSide}
+                                  <select className="ml-2 rounded border border-border bg-background px-2 py-1" value={paperPreviewSide} disabled={paperPreviewBusy !== null} onChange={(event) => { setPaperPreviewSide(event.target.value as "BUY" | "SELL"); setPaperPreviewResult(null); }}>
+                                    <option value="BUY">BUY</option><option value="SELL">SELL</option>
+                                  </select>
+                                </label>
+                                <button type="button" className="rounded border border-border px-2 py-1 text-xs disabled:opacity-50" disabled={paperPreviewBusy !== null} onClick={() => void previewPaperOrder(candidate)}>{text.paperPreviewButton}</button>
+                                {paperSetupEnabled && <button type="button" className="rounded border border-border px-2 py-1 text-xs" onClick={() => void savePaperDraft(candidate)}>{text.paperSaveDraft}</button>}
+                              </div>
+                            )}
+                            {paperPreviewResult?.id === candidate.strategy_version_id && paperPreviewResult.runId === candidate.run_id && <p className="mt-2 text-xs text-muted-foreground" role={paperPreviewResult.ok ? "status" : "alert"}>{paperPreviewResult.message}</p>}
                             {candidate.paper_deployable && !candidate.currently_deployed && (
                               <button
                                 type="button"
                                 className="mt-2 rounded-md border border-primary/40 px-2.5 py-1 text-[10px] font-medium text-primary disabled:opacity-50"
                                 disabled={paperCandidateSelecting !== null || paperRuntime?.phase !== "STOPPED"}
-                                onClick={() => void selectPaperStrategyCandidate(candidate.strategy_version_id)}
+                                onClick={() => void selectPaperStrategyCandidate(candidate.strategy_version_id, candidate.run_id)}
                               >
                                 {paperCandidateSelecting === candidate.strategy_version_id ? text.paperCandidateSelecting : text.paperCandidateSelect}
                               </button>

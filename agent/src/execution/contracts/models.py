@@ -386,8 +386,8 @@ class RiskGrant(StrictModel):
     def valid_grant_window(self) -> "RiskGrant":
         if self.valid_until <= self.valid_from:
             raise ValueError("valid_until must be after valid_from")
-        if not (self.valid_from <= self.granted_at <= self.valid_until):
-            raise ValueError("granted_at must fall within the grant validity window")
+        if self.granted_at >= self.valid_until:
+            raise ValueError("granted_at must precede the end of the grant validity window")
         if self.revoked_at is not None and self.revoked_at < self.granted_at:
             raise ValueError("revoked_at cannot precede granted_at")
         if self.halt_action != "pause_and_cancel_owned":

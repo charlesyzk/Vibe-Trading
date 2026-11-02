@@ -1,0 +1,4 @@
+backtrader==1.9.78.123
+exchange-calendars==4.13.2
+ib-async==2.0.1
+wasmtime==29.0.0

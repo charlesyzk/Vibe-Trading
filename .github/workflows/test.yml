@@ -232,6 +232,31 @@ jobs:
       - name: Install Vibe-Trading source backend
         run: python -m pip install -e .
 
+      - name: Verify PAPER and backtest locks on Windows
+        run: |
+          python -m pip install pytest "backtrader==1.9.78.123"
+          python -m pytest agent/tests/execution/test_local_file_lock.py agent/tests/execution/test_owner_lease.py agent/tests/execution/test_ibkr_order_ids.py -q
+          python -m pytest agent/tests/bt_runtime/test_python_upload_service.py -k backtest_run_lock -q
+
+      - name: Exercise isolated WASI worker on Windows
+        shell: pwsh
+        run: |
+          python -m pip install --require-hashes --no-deps --only-binary=:all: -r desktop/electron/requirements-paper-windows-lock.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Installing the PAPER worker lock failed.' }
+          $archive = Join-Path $env:RUNNER_TEMP 'python-wasi.tar.gz'
+          $root = Join-Path $env:RUNNER_TEMP 'python-wasi'
+          Invoke-WebRequest -Uri 'https://github.com/vmware-labs/webassembly-language-runtimes/releases/download/python/3.12.0%2B20231211-040d5a6/python-3.12.0-wasi-sdk-20.0.tar.gz' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '6c1cddbb69ae09e87eee2906bdc70539bff5f2969818a6f8457d4e6a6eb67d4d') { throw 'WASI archive hash mismatch.' }
+          New-Item -ItemType Directory -Path $root | Out-Null
+          tar -xzf $archive -C $root
+          if ($LASTEXITCODE -ne 0) { throw 'WASI fixture extraction failed.' }
+          $env:VIBE_WASI_TEST_ROOT = $root
+          $env:PYTHONPATH = 'agent'
+          python -c "import wasmtime; print('Windows Wasmtime import OK')"
+          if ($LASTEXITCODE -ne 0) { throw 'Wasmtime import failed.' }
+          python -m pytest agent/tests/execution/test_wasi_worker_host.py agent/tests/execution/test_python_sandbox.py -q
+          if ($LASTEXITCODE -ne 0) { throw 'WASI worker tests failed.' }
+
       - name: Install desktop dependencies
         working-directory: desktop/electron
         run: npm ci

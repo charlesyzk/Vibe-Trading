@@ -170,6 +170,9 @@ def configure_paper_execution_app(
 
 def _install_paper_execution_app_composition(target_app: FastAPI) -> None:
     """Install typed app-root composition, or establish the inert default."""
+    if not hasattr(target_app.state, "paper_draft_composition_factory"):
+        from src.execution.local_paper_draft_factory import build_local_paper_draft_composition
+        target_app.state.paper_draft_composition_factory = build_local_paper_draft_composition
     composition = getattr(target_app.state, "paper_execution_composition", None)
     if composition is None:
         factory_spec = os.environ.get("VIBE_PAPER_COMPOSITION_FACTORY", "").strip()
@@ -223,8 +226,29 @@ def _install_paper_execution_app_composition(target_app: FastAPI) -> None:
     if composition is None:
         # Materialize app-local defaults at startup so status and shutdown
         # observe the same manager even when no production composition exists.
-        _get_paper_execution_manager(target_app)
-        _get_paper_execution_readiness(target_app)
+        manager = _get_paper_execution_manager(target_app)
+        readiness = _get_paper_execution_readiness(target_app)
+        # Reopen only an existing local PAPER ledger; this does not connect to
+        # Gateway or reconstruct/activate a strategy. Its trusted scope comes
+        # from the local read-only loopback PAPER profile, never an HTTP input.
+        try:
+            from src.config.paths import get_runtime_root
+            from src.execution.contracts import Environment
+            from src.execution.order_ledger import SQLiteOrderLedger
+            from src.execution.paper_execution_manager import PaperRuntimeScope
+            from src.trading.connectors.ibkr.local import load_config
+
+            config = load_config()
+            database = get_runtime_root() / "paper-integration-test" / "execution.sqlite"
+            if (manager.runtime_factory is None and manager.status() is None and database.is_file()
+                    and config.profile == "paper" and config.readonly is True
+                    and config.port in {4002, 7497} and config.host.strip().lower() in {"localhost", "127.0.0.1", "::1"}
+                    and isinstance(config.account, str) and re.fullmatch(r"DU[A-Z0-9]+", config.account)):
+                scope = PaperRuntimeScope("IBKR", config.account, Environment.PAPER)
+                manager.bind_stopped_activity(scope, SQLiteOrderLedger(database))
+                _set_paper_execution_composition(manager, readiness, app=target_app, scope=scope)
+        except Exception:
+            logger.warning("Existing PAPER history could not be reopened")
         return
     if not isinstance(composition, PaperExecutionComposition):
         raise RuntimeError("invalid PAPER app composition")

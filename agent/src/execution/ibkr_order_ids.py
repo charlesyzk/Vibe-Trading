@@ -8,10 +8,11 @@ allocate an id.
 
 from __future__ import annotations
 
-import fcntl
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+
+from src.execution import local_file_lock
 
 
 class OrderIdNotReady(RuntimeError):
@@ -25,12 +26,14 @@ class IbkrOrderIdAllocator:
         self.path = str(Path(database_path).expanduser().resolve())
         self._lock_file = open(self.path + ".order-id-owner.lock", "a+b")
         try:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
+            local_file_lock.acquire(self._lock_file)
+        except OSError as exc:
             self._lock_file.close()
-            raise RuntimeError(
-                "another local execution process owns this IBKR order-id store"
-            ) from exc
+            if isinstance(exc, BlockingIOError):
+                raise RuntimeError(
+                    "another local execution process owns this IBKR order-id store"
+                ) from exc
+            raise
         try:
             with closing(sqlite3.connect(self.path)) as db:
                 db.execute("PRAGMA journal_mode=WAL")
@@ -157,8 +160,10 @@ class IbkrOrderIdAllocator:
 
     def close(self) -> None:
         if not self._lock_file.closed:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
-            self._lock_file.close()
+            try:
+                local_file_lock.release(self._lock_file)
+            finally:
+                self._lock_file.close()
 
     def __enter__(self) -> "IbkrOrderIdAllocator":
         return self

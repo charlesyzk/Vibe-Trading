@@ -1,0 +1,3 @@
+agent/src/execution/strategy_worker_image/worker.py text eol=lf
+agent/src/execution/wasi_worker_host.py text eol=lf
+vendor/ibapi/pythonclient/** -text

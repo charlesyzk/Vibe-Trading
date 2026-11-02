@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import {
   app,
   BrowserWindow,
@@ -27,6 +28,7 @@ let quitting = false;
 let desktopLocale: DesktopLocale = "en";
 let desktopMessages = getDesktopMessages(desktopLocale);
 const apiAuthKey = randomBytes(32).toString("base64url");
+const paperDesktopToken = `vtdp_${randomBytes(32).toString("base64url")}`;
 const productName = "Vibe-Trading Desktop (Unofficial Community Build)";
 const testUserData = process.env.VIBE_TRADING_DESKTOP_TEST_USER_DATA;
 let credentialStore: SecureCredentialStore | undefined;
@@ -92,7 +94,7 @@ function createWindow(): void {
       const backendOrigin = backend?.url ? new URL(backend.url).origin : undefined;
       const requestOrigin = safeOrigin(details.url);
       if (backendOrigin && requestOrigin === backendOrigin) {
-        applyBackendAuthorization(details.requestHeaders, apiAuthKey, details.url);
+        applyBackendAuthorization(details.requestHeaders, apiAuthKey, details.url, paperDesktopToken);
       }
       callback({ requestHeaders: details.requestHeaders });
     },
@@ -174,6 +176,8 @@ async function bootInternal(): Promise<void> {
     allowSourceDiscovery: !app.isPackaged,
     logDirectory: app.getPath("logs"),
     apiAuthKey,
+    paperDesktopToken,
+    paperDesktopSubject: `desktop-profile:${os.userInfo().username}`,
     messages: desktopMessages,
     credentialEnvironment: requireCredentialStore().environment(),
     onStatus: (message) => mainWindow?.webContents.send("desktop:status", message),

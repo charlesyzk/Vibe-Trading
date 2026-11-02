@@ -1,0 +1,46 @@
+name: Private PAPER installer retest
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'Private build run ID containing unsigned-paper-windows-review'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  install:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - name: Restrict retest to private repositories
+        if: ${{ !github.event.repository.private }}
+        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned-paper-windows-review
+          path: review-artifact
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify checksum and retest installation
+        working-directory: desktop/electron
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'review-artifact'
+          $installer = @(Get-ChildItem -LiteralPath $artifact -Filter 'Vibe-Trading-Desktop-Unofficial-*-x64.exe')
+          if ($installer.Count -ne 1) { throw 'Expected exactly one review installer.' }
+          $expected = ((Get-Content -Raw -LiteralPath (Join-Path $artifact 'SHA256SUMS.txt')).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ((Get-FileHash -LiteralPath $installer[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Installer checksum mismatch.' }
+          .\scripts\smoke-paper-installer.ps1 -Installer $installer[0].FullName -TestRoot (Join-Path $env:RUNNER_TEMP 'paper-install-test')

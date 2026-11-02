@@ -2,6 +2,7 @@ import json
 from datetime import date
 
 import backtrader
+import pytest
 
 from src.bt_runtime.report_artifact_integrity import write_report_integrity_sidecar
 from src.execution.event_worker import PYTHON_WORKER_COMPILER_VERSION
@@ -54,6 +55,10 @@ def _report(version):
             "quality_report": {"calendar_schedule_sha256": "c" * 64},
             "download_parameters": {
                 "application_ibkr_paper_import_attestation": import_attestation,
+                "qualified_contract": {
+                    "symbol": "AAPL", "sec_type": "STK", "currency": "USD",
+                    "con_id": 265598, "exchange": "SMART", "primary_exchange": "NASDAQ",
+                },
             },
             "evaluation_start": "2026-10-30",
             "evaluation_end": "2026-10-30",
@@ -101,6 +106,8 @@ def test_catalog_lists_verified_frozen_backtest_and_explains_paper_block(tmp_pat
     item = result["items"][0]
     assert item["strategy_version_id"] == version.version_id
     assert item["backtest_status"] == "verified"
+    assert item["frozen_quantity"] == 1
+    assert item["frozen_limit_price"] == "400.00"
     assert item["paper_deployable"] is True
     assert item["currently_deployed"] is False
 
@@ -119,10 +126,19 @@ def test_catalog_only_marks_exact_pinned_version_deployable_with_one_shot_attest
 
     result = list_paper_strategy_candidates(runtime_root=tmp_path)
 
-    assert len(result["items"]) == 1
-    assert result["items"][0]["paper_deployable"] is True
-    assert result["items"][0]["currently_deployed"] is True
-    assert result["items"][0]["run_id"] == "paper-integration-test"
+    assert len(result["items"]) == 2
+    selected = next(item for item in result["items"] if item["currently_deployed"])
+    assert selected["paper_deployable"] is True
+    assert selected["run_id"] == "paper-integration-test"
+    assert any(item["run_id"] == "bt_20261031_120000_abcdef123456" for item in result["items"])
+
+
+def test_catalog_preserves_multiple_runs_of_same_version(tmp_path):
+    version = _version(tmp_path)
+    _write_run(tmp_path, version, "bt_first")
+    _write_run(tmp_path, version, "bt_second")
+    items = list_paper_strategy_candidates(runtime_root=tmp_path)["items"]
+    assert {item["run_id"] for item in items} == {"bt_first", "bt_second"}
 
 
 def test_catalog_rejects_caller_spoofed_ibkr_paper_provider_without_server_attestation(tmp_path):
@@ -136,6 +152,22 @@ def test_catalog_rejects_caller_spoofed_ibkr_paper_provider_without_server_attes
     assert len(result["items"]) == 1
     assert result["items"][0]["paper_deployable"] is False
     assert "backtest_data_lacks_server_verified_ibkr_paper_import" in result["items"][0]["paper_block_reasons"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("con_id", 1234), ("symbol", "MSFT"), ("sec_type", "OPT"), ("currency", "EUR"),
+])
+def test_catalog_rejects_contract_identity_mismatch_even_with_intact_report(tmp_path, field, value):
+    version = _version(tmp_path)
+    path = _write_run(tmp_path, version)
+    report = json.loads(path.read_text())
+    report["data_manifest"]["download_parameters"]["qualified_contract"][field] = value
+    path.write_text(json.dumps(report), encoding="utf-8")
+    write_report_integrity_sidecar(path)
+
+    item = list_paper_strategy_candidates(runtime_root=tmp_path)["items"][0]
+    assert item["paper_deployable"] is False
+    assert "backtest_data_lacks_server_verified_ibkr_paper_import" in item["paper_block_reasons"]
 
 
 def test_catalog_skips_failed_run_and_report_without_integrity_sidecar(tmp_path):

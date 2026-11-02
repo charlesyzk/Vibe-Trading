@@ -19,6 +19,8 @@ type BackendManagerOptions = {
   allowSourceDiscovery: boolean;
   logDirectory: string;
   apiAuthKey: string;
+  paperDesktopToken?: string;
+  paperDesktopSubject?: string;
   messages: DesktopMessages;
   credentialEnvironment?: NodeJS.ProcessEnv;
   shutdownEvidenceTimeoutMilliseconds?: number;
@@ -109,6 +111,10 @@ export class BackendManager {
       ...process.env,
       ...this.options.credentialEnvironment,
       API_AUTH_KEY: this.options.apiAuthKey,
+      VIBE_PAPER_DESKTOP_TOKEN: this.options.paperDesktopToken ?? "",
+      VIBE_PAPER_DESKTOP_SUBJECT: this.options.paperDesktopSubject ?? "",
+      VIBE_WASI_WORKER_ROOT: existsSync(path.join(path.dirname(executable), "wasi-runtime", "python.wasm"))
+        ? path.join(path.dirname(executable), "wasi-runtime") : "",
       VIBE_TRADING_DESKTOP_SECURE_CREDENTIALS: "1",
       PYTHONUTF8: "1",
       PYTHONUNBUFFERED: "1",

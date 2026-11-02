@@ -129,6 +129,7 @@ export interface PaperExecutionActivity {
     average_fill_price: string | null;
     broker_order_id: number | null;
     attempt_id: string | null;
+    cancel_state?: "SEND_STARTED" | "UNKNOWN" | "CONFIRMED" | "REJECTED" | null;
     intent: {
       instrument_id: string;
       side: string;
@@ -214,6 +215,8 @@ export interface PaperStrategyCandidate {
   execution_order_type: string;
   execution_time_in_force: string;
   position_mode: string;
+  frozen_quantity?: number | null;
+  frozen_limit_price?: string | null;
   run_id: string;
   backtest_status: "verified";
   backtest_report_sha256: string;
@@ -237,6 +240,12 @@ export interface PaperStrategyCandidatesResponse {
     time_in_force: string;
   };
 }
+
+export type PaperOrderDraftInput = {
+  run_id: string; strategy_version_id: string;
+  order: { instrument_id: string; side: "BUY" | "SELL"; integer_qty: number; order_type: string; time_in_force: string; limit_price: string | null };
+  setup: { valid_from: string; valid_until: string; max_order_notional: string; max_gross_exposure: string; strategy_budget: string; max_daily_loss: string; max_orders_per_session: number };
+};
 
 export interface PortfolioConnectorCompatibility {
   level: "native" | "contract_tested" | "experimental";
@@ -470,6 +479,19 @@ async function errorFromResponse(res: Response): Promise<ApiError> {
     const raw = body.detail ?? body.message ?? body.error;
     if (typeof raw === "string" && raw) {
       detail = raw;
+    } else if (Array.isArray(raw)) {
+      // FastAPI validation errors identify the field and reason separately.
+      // Do not include the rejected input, which may contain private data.
+      const reasons = raw.slice(0, 3).flatMap((item: unknown) => {
+        if (!item || typeof item !== "object") return [];
+        const entry = item as { loc?: unknown; msg?: unknown };
+        if (typeof entry.msg !== "string" || !entry.msg) return [];
+        const field = Array.isArray(entry.loc)
+          ? entry.loc.filter((part: unknown) => typeof part === "string" || typeof part === "number").slice(-2).join(".")
+          : "";
+        return [`${field ? `${field}: ` : ""}${entry.msg.slice(0, 240)}`];
+      });
+      if (reasons.length) detail = reasons.join("; ");
     } else if (raw && typeof raw === "object") {
       const structured = raw as { code?: unknown; message?: unknown; max_length?: unknown };
       if (typeof structured.code === "string" && structured.code) code = structured.code;
@@ -549,13 +571,23 @@ export const api = {
     ),
   getPortfolio: () => request<{ status: string; snapshot: PortfolioSnapshot | null }>("/api/portfolio"),
   getPaperExecutionStatus: () => request<PaperExecutionStatus>("/api/execution/paper/status"),
+  connectLocalPaperGateway: () => request<{ verified: true; environment: "paper"; account_ref: string; connection: string; read_only_check: true }>("/api/execution/paper/connect", { method: "POST" }),
   getPaperExecutionActivity: () => request<PaperExecutionActivity>("/api/execution/paper/activity?limit=50"),
   cancelPaperExecutionOrder: (intentId: string) => request<{ intent_id: string; state: string }>("/api/execution/paper/cancel-owned-order", {
     method: "POST", body: JSON.stringify({ intent_id: intentId }),
   }),
   getPaperIntegrationTestStatus: () => request<PaperIntegrationTestStatus>("/api/execution/paper/integration-test/status"),
   getPaperStrategyCandidates: () => request<PaperStrategyCandidatesResponse>("/api/execution/paper/strategy-candidates"),
-  selectPaperStrategyCandidate: (strategyVersionId: string) => request<{
+  suggestPaperWindow: () => request<{ valid_from: string; valid_until: string }>("/api/execution/paper/suggest-window"),
+  previewPaperOrder: (body: Omit<PaperOrderDraftInput, "setup"> & { setup?: PaperOrderDraftInput["setup"] }) => request<{
+    contract: { symbol: string; con_id: number; primary_exchange: string };
+    live_risk_checked: false; ready_for_submission: false; order_submission_performed: false;
+  }>("/api/execution/paper/order-preview", { method: "POST", body: JSON.stringify(body) }),
+  savePaperOrderDraft: (body: PaperOrderDraftInput) => request<{ draft: PaperOrderDraftInput }>("/api/execution/paper/order-draft", { method: "PUT", body: JSON.stringify(body) }),
+  getPaperOrderDraft: () => request<{ draft: PaperOrderDraftInput | null }>("/api/execution/paper/order-draft"),
+  deployPaperOrderDraft: () => request<{ strategy_version_id: string; run_id: string; session_started: false; order_submission_performed: false }>("/api/execution/paper/order-draft/deploy", { method: "POST" }),
+  runPaperOrderDraft: () => request<{ signal_enqueued: boolean; broker_order_confirmed: boolean }>("/api/execution/paper/order-draft/run", { method: "POST" }),
+  selectPaperStrategyCandidate: (strategyVersionId: string, runId: string) => request<{
     strategy_version_id: string;
     backtest_report_sha256: string;
     composition_ready: boolean;
@@ -563,14 +595,16 @@ export const api = {
     order_submission_performed: false;
   }>("/api/execution/paper/strategy-candidates/select", {
     method: "POST",
-    body: JSON.stringify({ strategy_version_id: strategyVersionId }),
+    body: JSON.stringify({ strategy_version_id: strategyVersionId, run_id: runId }),
   }),
   runPaperIntegrationTest: () => request<PaperIntegrationTestResult>("/api/execution/paper/integration-test/run", { method: "POST" }),
+  startPaperCancelRecovery: () => request<PaperExecutionStatus>("/api/execution/paper/cancel-recovery/start", { method: "POST" }),
   startPaperExecution: (strategyVersionId: string) => request<PaperExecutionStatus>("/api/execution/paper/start", {
     method: "POST",
     body: JSON.stringify({ strategy_version_id: strategyVersionId }),
   }),
   activatePaperExecution: () => request<PaperExecutionStatus>("/api/execution/paper/activate", { method: "POST" }),
+  stopPaperExecution: () => request<PaperExecutionStatus>("/api/execution/paper/stop", { method: "POST" }),
   paperExecutionActivityEventsUrl: (afterSeq: number) =>
     `${BASE}/api/execution/paper/activity/events?after_seq=${encodeURIComponent(String(afterSeq))}`,
   pausePaperExecution: () => request<PaperExecutionStatus>("/api/execution/paper/pause", { method: "POST" }),

@@ -15,7 +15,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Protocol
 
-from src.execution.contracts import Environment
+from src.execution.contracts import Environment, is_sha256
 from src.execution.execution_service import (
     ExecutionServiceNotReady,
     PaperExecutionService,
@@ -143,6 +143,8 @@ class PaperExecutionManager:
         # runtime factory cannot establish account/session/provider wiring.
         self.startup_readiness = startup_readiness or PaperExecutionReadiness()
         self._entry: _ManagedEntry | None = None
+        self._lifecycle_generation = 0
+        self._configuration_generation = 0
         self._lock = RLock()
         self._stopped_activity: tuple[PaperRuntimeScope, object] | None = None
 
@@ -378,6 +380,7 @@ class PaperExecutionManager:
                 raise PaperRuntimeNotReady(f"PAPER runtime composition is incomplete: {missing}")
 
             entry = _ManagedEntry(scope=scope, runtime=None, phase="STARTING")
+            self._lifecycle_generation += 1
             self._entry = entry
             started = False
             try:
@@ -433,6 +436,36 @@ class PaperExecutionManager:
             self._authorize(principal, scope, "start")
             return self.start(scope)
 
+    def start_for_cancel_recovery(self, scope: PaperRuntimeScope, principal: Principal) -> PaperRuntimeStatus:
+        """Reconnect PAUSED for known working orders under a separate cancel grant."""
+        with self._lock:
+            self._authorize(principal, scope, "cancel")
+            if self._entry is not None:
+                raise PaperRuntimeConflict("stop the existing PAPER runtime before cancel recovery")
+            if self._stopped_activity is None or self._stopped_activity[0] != scope:
+                raise PaperRuntimeNotReady("matching stopped PAPER order history is unavailable")
+            ledger = self._stopped_activity[1]
+            recovery = ledger.recovery_snapshot_for_scope(
+                broker=scope.broker, account_ref=scope.account_ref, environment=scope.environment,
+            )
+            if (not recovery.active_orders or recovery.ready_to_reserve or recovery.ready_to_send
+                    or recovery.unresolved_sends):
+                raise PaperRuntimeConflict("cancel recovery requires known working orders with no unresolved sends")
+            builder = getattr(self.runtime_factory, "session_builder", None)
+            deployment_id = getattr(builder, "deployment_id", None)
+            version_id = getattr(self.runtime_factory, "strategy_version_id", None)
+            if (not isinstance(deployment_id, str) or not deployment_id
+                    or not isinstance(version_id, str) or not is_sha256(version_id)):
+                raise PaperRuntimeNotReady("cancel recovery requires a pinned deployment and strategy")
+            for record in recovery.active_orders:
+                intent = ledger.get_intent(record.intent_id)
+                if intent.deployment_id != deployment_id or intent.strategy_version_hash != version_id:
+                    raise PaperRuntimeConflict("working orders belong to another PAPER deployment")
+            status = self.start(scope)
+            if status.control_state is not ExecutionControlState.PAUSED:
+                raise ExecutionServiceNotReady("cancel recovery did not remain paused")
+            return status
+
     def activate(self, scope: PaperRuntimeScope, principal: Principal) -> PaperRuntimeStatus:
         """Open dispatch only for an attributable actor with explicit grant."""
         with self._lock:
@@ -485,6 +518,56 @@ class PaperExecutionManager:
                     entry.phase = "ERROR"
                 raise
             return self.status() or status
+
+    def scheduled_session_token(self, scope: PaperRuntimeScope) -> object:
+        """Capture the exact running runtime identity for a scheduler."""
+        with self._lock:
+            entry = self._require_entry(scope, phase="READY")
+            assert entry.runtime is not None
+            if entry.runtime.service.state()[0] is not ExecutionControlState.RUNNING:
+                raise PaperRuntimeConflict("scheduled bars require a running PAPER session")
+            return entry
+
+    def is_scheduled_session_current(self, scope: PaperRuntimeScope, token: object) -> bool:
+        with self._lock:
+            entry = self._entry
+            return bool(entry is token and entry.scope == scope and entry.phase == "READY" and entry.runtime is not None)
+
+    def push_scheduled_completed_bar(
+        self, scope: PaperRuntimeScope, *, expected_strategy_version_id: str, bar: Any,
+        is_current: Callable[[], bool] = lambda: True,
+    ) -> PaperRuntimeStatus:
+        """Feed an already-validated bar to the exact active managed session.
+
+        This internal primitive does not start or activate a runtime. The
+        scheduler remains responsible for calendar, source and cursor checks.
+        """
+        with self._lock:
+            if not is_current():
+                raise PaperRuntimeConflict("PAPER deployment changed")
+            entry = self._require_entry(scope, phase="READY")
+            runtime = entry.runtime
+            assert runtime is not None
+            if getattr(runtime, "version_id", None) != expected_strategy_version_id:
+                raise PaperRuntimeNotReady("active session differs from the scheduled strategy version")
+            state, _reason = runtime.service.state()
+            if state is not ExecutionControlState.RUNNING:
+                raise PaperRuntimeConflict("scheduled bars require a running PAPER session")
+            push = getattr(runtime, "push_completed_bar", None)
+            if not callable(push):
+                raise PaperRuntimeNotReady("managed strategy session cannot accept completed bars")
+            try:
+                push(bar)
+            except Exception:
+                try:
+                    runtime.pause(reason="scheduled_bar_rejected")
+                except Exception:
+                    entry.phase = "ERROR"
+                raise
+            status = self.status()
+            if status is None:
+                raise PaperRuntimeNotReady("scheduled PAPER session is unavailable")
+            return status
 
     def recover_failed_session(
         self, scope: PaperRuntimeScope, principal: Principal,
@@ -672,7 +755,7 @@ class PaperExecutionManager:
         return entry
 
     def _authorize(self, principal: Principal, scope: PaperRuntimeScope, action: str) -> None:
-        if not isinstance(principal, Principal) or not principal.attributable:
+        if not isinstance(principal, Principal) or not principal.paper_operator:
             raise PaperRuntimeAuthorizationError("an attributable human principal is required")
         try:
             allowed = self.control_authorizer(principal, scope, action)

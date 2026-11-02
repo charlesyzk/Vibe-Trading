@@ -144,6 +144,17 @@ def test_account_snapshot_reads_summary(fake_ib_async) -> None:
     assert result["summary"][0]["tag"] == "NetLiquidation"
 
 
+def test_connection_bounds_synchronous_requests(fake_ib_async) -> None:
+    class _TimeoutAwareIB(_FakeIB):
+        def accountSummary(self, account=""):
+            assert self.RequestTimeout == 2.5
+            raise TimeoutError("account summary timed out")
+
+    fake_ib_async.IB = _TimeoutAwareIB
+    with pytest.raises(TimeoutError, match="timed out"):
+        local.get_account_snapshot(local.IBKRLocalConfig(timeout=2.5))
+
+
 def test_positions_are_serialized(fake_ib_async) -> None:
     result = local.get_positions(local.IBKRLocalConfig())
 

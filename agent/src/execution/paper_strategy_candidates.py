@@ -35,10 +35,12 @@ def list_paper_strategy_candidates(*, runtime_root: str | Path | None = None) ->
     try:
         config = read_paper_integration_test_config(root / "paper-integration-test.json")
         selected_version_id = config.strategy_version_id
+        selected_report_sha256 = config.backtest_report_sha256
     except Exception:
         selected_version_id = None
+        selected_report_sha256 = None
 
-    candidates: dict[str, dict[str, Any]] = {}
+    candidates: list[dict[str, Any]] = []
     runs_dir = root / "runs"
     for run_dir in _run_directories(runs_dir):
         try:
@@ -87,9 +89,7 @@ def list_paper_strategy_candidates(*, runtime_root: str | Path | None = None) ->
                 selected_version_id=selected_version_id,
                 one_shot_verified=False,
             )
-            previous = candidates.get(version_id)
-            if previous is None or item["run_id"] > previous["run_id"]:
-                candidates[version_id] = item
+            candidates.append(item)
         except Exception:
             # A single stale/corrupt local run cannot hide other valid versions.
             continue
@@ -100,9 +100,10 @@ def list_paper_strategy_candidates(*, runtime_root: str | Path | None = None) ->
             attestation = verify_paper_backtest_attestation(
                 root / "paper-integration-test" / "backtests",
                 version=version,
+                report_sha256=selected_report_sha256,
             )
             report = json.loads(attestation.report_path.read_text(encoding="utf-8"))
-            candidates[selected_version_id] = _candidate(
+            candidates.append(_candidate(
                 version=version,
                 run_id="paper-integration-test",
                 report_sha256=attestation.report_sha256,
@@ -111,11 +112,11 @@ def list_paper_strategy_candidates(*, runtime_root: str | Path | None = None) ->
                 selected_version_id=selected_version_id,
                 one_shot_verified=True,
                 trusted_dedicated_backtest=True,
-            )
+            ))
         except (OSError, ValueError, PaperBacktestAttestationError, json.JSONDecodeError):
             pass
 
-    ordered = sorted(candidates.values(), key=lambda item: (item["created_run_id"], item["strategy_version_id"]), reverse=True)
+    ordered = sorted(candidates, key=lambda item: (item["created_run_id"], item["strategy_version_id"]), reverse=True)
     return {
         "items": ordered,
         "deployment_mode": "fixed_one_shot_paper_integration",
@@ -139,6 +140,12 @@ def _candidate(*, version, run_id: str, report_sha256: str, report: dict[str, An
         trusted_dedicated_backtest=trusted_dedicated_backtest,
     )
     attested_current = version.version_id == selected_version_id and one_shot_verified
+    raw_limit = version.spec.parameters.get("limit_price_usd")
+    try:
+        limit = Decimal(str(raw_limit))
+        frozen_limit = str(limit) if limit.is_finite() and limit > 0 else None
+    except (InvalidOperation, TypeError, ValueError):
+        frozen_limit = None
     return {
         "strategy_version_id": version.version_id,
         "strategy_id": version.strategy_id,
@@ -147,6 +154,14 @@ def _candidate(*, version, run_id: str, report_sha256: str, report: dict[str, An
         "execution_order_type": version.spec.execution_policy.order_type,
         "execution_time_in_force": version.spec.execution_policy.time_in_force,
         "position_mode": version.spec.position_policy.mode.value,
+        "frozen_limit_price": frozen_limit,
+        "frozen_quantity": (
+            version.spec.parameters.get("quantity")
+            if version.spec.position_policy.mode.value == "explicit_quantity"
+            and type(version.spec.parameters.get("quantity")) is int
+            and version.spec.parameters["quantity"] > 0
+            else None
+        ),
         "run_id": run_id,
         "created_run_id": run_id,
         "backtest_status": "verified",
@@ -255,6 +270,7 @@ def _verified_paper_import_attestation(attestation: Any, report: dict[str, Any])
     if not isinstance(download_parameters, dict):
         return False
     embedded = download_parameters.get("application_ibkr_paper_import_attestation")
+    contract = download_parameters.get("qualified_contract")
     quality = manifest.get("quality_report")
     return bool(
         attestation.get("schema_version") == "ibkr-paper-import-attestation/1"
@@ -268,6 +284,13 @@ def _verified_paper_import_attestation(attestation: Any, report: dict[str, Any])
         and isinstance(attestation.get("con_id"), int)
         and not isinstance(attestation.get("con_id"), bool)
         and attestation.get("con_id") > 0
+        and isinstance(contract, dict)
+        and contract.get("con_id") == attestation.get("con_id")
+        and isinstance(attestation.get("symbol"), str)
+        and bool(attestation["symbol"])
+        and str(contract.get("symbol", "")).upper() == attestation["symbol"]
+        and str(contract.get("sec_type", "")).upper() == "STK"
+        and str(contract.get("currency", "")).upper() == "USD"
         and isinstance(attestation.get("retrieved_at"), str)
         and len(str(attestation.get("snapshot_sha256", ""))) == 64
         and embedded == attestation

@@ -5,9 +5,10 @@ import json
 from datetime import date, datetime, timedelta, timezone
 
 import backtrader as bt
+import pytest
 
 from src.bt_runtime.market_data import CSV_COLUMNS, MarketDataMetadata, MarketSession, import_completed_daily_csv
-from src.bt_runtime.strategies.python_upload_service import run_python_upload_service
+from src.bt_runtime.strategies.python_upload_service import _exclusive_run_lock, run_python_upload_service
 from src.execution.contracts import StrategySpec
 from src.execution.event_worker import PYTHON_WORKER_COMPILER_VERSION
 from src.execution.versions import StrategyVersionStore
@@ -19,6 +20,16 @@ class NoOrderSandbox:
             "protocol_version": request["protocol_version"], "request_id": request["request_id"],
             "event_id": request["event_id"], "state": request["state"], "order_proposals": [],
         }})()
+
+
+def test_backtest_run_lock_rejects_concurrent_resume_and_releases(tmp_path):
+    path = tmp_path / "backtest.lock"
+    with _exclusive_run_lock(path):
+        with pytest.raises(RuntimeError, match="already running or resuming"):
+            with _exclusive_run_lock(path):
+                pass
+    with _exclusive_run_lock(path):
+        assert path.is_file()
 
 
 def test_service_persists_exact_imported_data_version_manifest_and_backtrader_report(tmp_path):

@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import tempfile
-import fcntl
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from src.bt_runtime.market_data import ImportedMarketData
 from src.bt_runtime.backtest_event_journal import SQLiteBacktestEventJournal
 from src.bt_runtime.strategies.python_upload import run_python_upload_backtest
 from src.execution.contracts import SourceKind, canonical_json, canonical_sha256
+from src.execution import local_file_lock
 from src.execution.event_worker import PythonBacktestEventCoordinator
 from src.execution.python_sandbox import PythonSandbox
 from src.execution.versions import StrategyVersionStore
@@ -188,13 +188,13 @@ def load_python_upload_resume_inputs(run_dir: str | Path) -> dict[str, Any]:
 def _exclusive_run_lock(path: Path):
     with path.open("a+b") as lock_file:
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            local_file_lock.acquire(lock_file)
         except BlockingIOError as exc:
             raise RuntimeError("this Backtrader backtest is already running or resuming") from exc
         try:
             yield
         finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            local_file_lock.release(lock_file)
 
 
 def _derive_resume_context(market_data: ImportedMarketData) -> dict[str, Any]:

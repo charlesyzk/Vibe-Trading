@@ -343,3 +343,32 @@ def test_api_lifespan_rejects_invalid_configured_paper_factory(
 
     with pytest.raises(RuntimeError, match="trusted module:function"):
         api_server._install_paper_execution_app_composition(target_app)
+
+
+def test_inert_paper_startup_reopens_existing_scoped_history_without_connecting(tmp_path, monkeypatch):
+    import api_server
+    from fastapi import FastAPI
+    from src.config import paths
+    from src.execution.order_ledger import SQLiteOrderLedger
+    from src.trading.connectors.ibkr import local
+    from src.trading.connectors.ibkr.local import IBKRLocalConfig
+
+    monkeypatch.delenv("VIBE_PAPER_COMPOSITION_FACTORY", raising=False)
+    monkeypatch.setattr(paths, "get_runtime_root", lambda: tmp_path)
+    database = tmp_path / "paper-integration-test" / "execution.sqlite"
+    database.parent.mkdir()
+    SQLiteOrderLedger(database)
+    monkeypatch.setattr(local, "load_config", lambda: IBKRLocalConfig(
+        profile="paper", host="127.0.0.1", port=4002, account="DU123", readonly=True))
+    target = FastAPI()
+    api_server._install_paper_execution_app_composition(target)
+    assert target.state.paper_execution_scope.account_ref == "DU123"
+    assert target.state.paper_execution_manager.runtime_factory is None
+    assert target.state.paper_execution_manager.status() is None
+    assert target.state.paper_execution_manager.activity_snapshot()["environment"] == "paper"
+
+    monkeypatch.setattr(local, "load_config", lambda: IBKRLocalConfig(
+        profile="live-readonly", host="127.0.0.1", port=4001, account="DU123", readonly=True))
+    live_target = FastAPI()
+    api_server._install_paper_execution_app_composition(live_target)
+    assert not hasattr(live_target.state, "paper_execution_scope")

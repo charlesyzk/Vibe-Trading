@@ -8,6 +8,7 @@ import os
 import selectors
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, timezone
 from decimal import Decimal
@@ -55,21 +56,26 @@ def _run_replay_worker(
     command: Sequence[str] | None = None,
 ) -> tuple[int, bytes, bytes]:
     """Run the trusted replay worker with bounded stdin/stdout/stderr pipes."""
+    child_env = {
+        "PATH": os.defpath,
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONIOENCODING": "utf-8",
+    }
+    if os.name == "nt" and os.environ.get("SystemRoot"):
+        child_env["SystemRoot"] = os.environ["SystemRoot"]
     process = subprocess.Popen(
         list(command or (sys.executable, "-m", "src.bt_runtime.report_replay_worker")),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
-        env={
-            "PATH": os.defpath,
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONIOENCODING": "utf-8",
-        },
+        env=child_env,
         bufsize=0,
     )
     assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    if os.name == "nt":
+        return _run_replay_pipes_threaded(process, request_bytes, timeout_seconds)
     selector = selectors.DefaultSelector()
     streams = (process.stdin, process.stdout, process.stderr)
     for stream in streams:
@@ -122,6 +128,72 @@ def _run_replay_worker(
         selector.close()
         for stream in streams:
             if not stream.closed:
+                stream.close()
+
+
+def _run_replay_pipes_threaded(process: subprocess.Popen, request: bytes, timeout: float) -> tuple[int, bytes, bytes]:
+    """Use bounded threads for Windows anonymous pipes, which cannot be selected."""
+    assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    stop = threading.Event()
+    errors: list[Exception] = []
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    limits = {"stdout": MAX_REPLAY_RESPONSE_BYTES, "stderr": 64 * 1024}
+
+    def write() -> None:
+        try:
+            view = memoryview(request)
+            while view and not stop.is_set():
+                count = process.stdin.write(view[:65536])
+                if not count:
+                    raise OSError("replay input made no progress")
+                view = view[count:]
+        except (BrokenPipeError, OSError):
+            pass  # Worker exit status is checked by the caller.
+        finally:
+            process.stdin.close()
+
+    def read(stream, name: str) -> None:
+        try:
+            while not stop.is_set():
+                chunk = stream.read(65536)
+                if not chunk:
+                    return
+                captured[name].extend(chunk)
+                if len(captured[name]) > limits[name]:
+                    errors.append(ReportReplayMismatch(f"replay worker {name} exceeded its output limit"))
+                    stop.set()
+                    return
+        except OSError:
+            if not stop.is_set():
+                errors.append(ReportReplayMismatch("replay worker output pipe failed"))
+                stop.set()
+
+    streams = (process.stdin, process.stdout, process.stderr)
+    threads = (threading.Thread(target=write, daemon=True),
+               threading.Thread(target=read, args=(process.stdout, "stdout"), daemon=True),
+               threading.Thread(target=read, args=(process.stderr, "stderr"), daemon=True))
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if errors:
+                raise errors[0]
+            if process.poll() is not None and all(not thread.is_alive() for thread in threads):
+                return process.returncode, bytes(captured["stdout"]), bytes(captured["stderr"])
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("replay worker timed out")
+            stop.wait(min(0.02, remaining))
+    finally:
+        stop.set()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        for thread in threads:
+            thread.join(timeout=0.2)
+        for thread, stream in zip(threads, streams):
+            if not thread.is_alive() and not stream.closed:
                 stream.close()
 
 

@@ -14,7 +14,7 @@ import backtrader
 from src.bt_runtime.calendars import EXPECTED_CALENDAR_VERSION
 from src.bt_runtime.feeds.paper_queue import PaperCompletedBarFeed
 from src.execution.backtrader_dispatch import ContractIdentity
-from src.execution.contracts import Environment, PositionMode, RiskGrant, SourceKind, is_sha256
+from src.execution.contracts import Environment, PositionMode, RiskGrant, SourceKind, canonical_json, is_sha256
 from src.execution.dispatch_service import DispatchRiskSnapshot, PaperOrderDispatchService
 from src.execution.event_journal import JournalError, SQLiteEventJournal
 from src.execution.event_worker import PYTHON_WORKER_COMPILER_VERSION, PythonEventCoordinator
@@ -67,6 +67,7 @@ class PythonUploadPaperSessionBuilder:
         queue_size: int = 256,
         idle_poll_seconds: float = 0.05,
         allow_unreported_usd_cash: bool = False,
+        initial_checkpoint: dict[str, Any] | None = None,
     ) -> None:
         if not isinstance(version_store, StrategyVersionStore):
             raise TypeError("version_store must be a trusted StrategyVersionStore")
@@ -114,6 +115,10 @@ class PythonUploadPaperSessionBuilder:
         if type(allow_unreported_usd_cash) is not bool:
             raise TypeError("allow_unreported_usd_cash must be a bool")
         self.allow_unreported_usd_cash = allow_unreported_usd_cash
+        if initial_checkpoint is not None and not isinstance(initial_checkpoint, dict):
+            raise TypeError("initial checkpoint must be a JSON object")
+        import json
+        self.initial_checkpoint = json.loads(canonical_json(initial_checkpoint or {}))
         self.queue_size = queue_size
         self.idle_poll_seconds = idle_poll_seconds
 
@@ -386,6 +391,7 @@ class PythonUploadPaperSessionBuilder:
                 account_ref=identity["account_ref"],
                 environment=Environment(identity["environment"]),
                 strategy_version_hash=identity["strategy_version_hash"],
+                initial_checkpoint=self.initial_checkpoint,
             )
         except JournalError as create_error:
             try:
@@ -398,6 +404,9 @@ class PythonUploadPaperSessionBuilder:
                 raise PythonUploadPaperSessionBuildError(
                     "existing run identity differs from the pinned Python-upload deployment"
                 ) from create_error
+            prefix = journal.read_committed_prefix(self.run_id)
+            if prefix.initial_checkpoint != self.initial_checkpoint:
+                raise PythonUploadPaperSessionBuildError("existing run has a different initial strategy checkpoint") from create_error
 
     @staticmethod
     def _validate_proposal_inputs(

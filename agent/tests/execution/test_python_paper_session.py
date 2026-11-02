@@ -19,7 +19,7 @@ from src.execution.execution_service import PaperExecutionService
 from src.execution.ibkr_callback_pump import BrokerOrderIndex, ContractIdentity, IbkrCallbackPump
 from src.execution.order_ledger import LocalOrderState, OrderIntentInput, SQLiteOrderLedger
 from src.execution.outbox_dispatch import AuthorizedProposal, PythonOutboxIntentHandoff
-from src.execution.python_paper_session import PythonPaperSession, PythonPaperSessionError
+from src.execution.python_paper_session import PythonPaperSession, PythonPaperSessionError, _SessionStrategy
 from src.execution.risk import PositionFact, RiskDecision, RiskFacts
 from src.execution.versions import StrategyVersionStore
 
@@ -205,6 +205,16 @@ def _build(tmp_path, *, journal_version=None, transport=None, proposals=(), prop
         service.close()
         raise
     return session, version, service, sandbox, ledger, sent, clock
+
+
+def test_replayed_bar_must_match_committed_content():
+    bar = _bar()
+    shell = SimpleNamespace(data=SimpleNamespace(current_completed_bar=bar), _last_bar=bar,
+                            _last_bar_end=bar.end_at)
+    _SessionStrategy.next(shell)
+    shell.data.current_completed_bar = bar.model_copy(update={"close": bar.close + Decimal("0.1")})
+    with pytest.raises(PythonPaperSessionError, match="differs from the committed bar"):
+        _SessionStrategy.next(shell)
 
 
 def test_explicit_session_pins_version_and_runs_host_pushed_bar_in_real_cerebro(tmp_path):

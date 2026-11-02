@@ -171,6 +171,8 @@ def evaluate_order_risk(
     reasons: list[str] = []
 
     now = facts.now
+    if now < grant.granted_at:
+        reasons.append("grant_not_yet_issued")
     if grant.revoked_at is not None and grant.revoked_at <= now:
         reasons.append("grant_revoked")
     if now < grant.valid_from or now >= grant.valid_until:

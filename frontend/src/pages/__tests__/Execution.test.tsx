@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { Execution } from "../Execution";
 
 const paperSse = vi.hoisted(() => {
@@ -24,6 +24,11 @@ vi.mock("@/hooks/useSSE", () => ({
 }));
 
 vi.mock("@/lib/api", () => ({
+  ApiError: class ApiError extends Error {
+    status: number;
+    code?: string;
+    constructor(message: string, status: number, code?: string) { super(message); this.status = status; this.code = code; }
+  },
   api: {
     getPaperExecutionStatus: vi.fn().mockResolvedValue({
       configured: false,
@@ -45,6 +50,7 @@ vi.mock("@/lib/api", () => ({
       last_error_code: null,
     }),
     getPaperExecutionActivity: vi.fn().mockRejectedValue(new Error("no active PAPER runtime")),
+    connectLocalPaperGateway: vi.fn(),
     cancelPaperExecutionOrder: vi.fn(),
     getPaperIntegrationTestStatus: vi.fn().mockResolvedValue({
       configured: false, enabled: false, window_open: false,
@@ -58,15 +64,24 @@ vi.mock("@/lib/api", () => ({
       items: [], deployment_mode: "fixed_one_shot_paper_integration",
       supported_order: { instrument: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400.00", time_in_force: "DAY" },
     }),
+    previewPaperOrder: vi.fn(),
+    suggestPaperWindow: vi.fn(),
     selectPaperStrategyCandidate: vi.fn(),
+    savePaperOrderDraft: vi.fn(),
+    getPaperOrderDraft: vi.fn(),
+    deployPaperOrderDraft: vi.fn(),
+    runPaperOrderDraft: vi.fn(),
+    startPaperCancelRecovery: vi.fn(),
     runPaperIntegrationTest: vi.fn(),
     paperExecutionActivityEventsUrl: vi.fn((afterSeq: number) => `/api/execution/paper/activity/events?after_seq=${afterSeq}`),
     startPaperExecution: vi.fn(),
     activatePaperExecution: vi.fn(),
+    stopPaperExecution: vi.fn(),
     pausePaperExecution: vi.fn(),
     previewExecutionBacktest: vi.fn(),
     createExecutionBacktest: vi.fn(),
     previewPythonUploadBacktest: vi.fn(),
+    previewIbkrPythonMarketData: vi.fn(),
     createPythonUploadBacktest: vi.fn(),
   },
 }));
@@ -78,6 +93,7 @@ function renderExecution() {
 describe("Execution page", () => {
   afterEach(() => {
     vi.useRealTimers();
+    delete window.vibeDesktop;
   });
 
   beforeEach(() => {
@@ -86,6 +102,7 @@ describe("Execution page", () => {
     paperSse.disconnect.mockReset();
     paperSse.onStatusChange.mockClear();
     paperSse.statusHandler = null;
+    vi.mocked(api.connectLocalPaperGateway).mockReset().mockRejectedValue(new Error("no PAPER Gateway"));
     vi.mocked(api.getPaperExecutionActivity).mockRejectedValue(new Error("no active PAPER runtime"));
     vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
       configured: false,
@@ -123,6 +140,7 @@ describe("Execution page", () => {
   it("shows the verified offline Backtrader fixture and makes its limits explicit", async () => {
     renderExecution();
 
+    expect(screen.getByText("PAPER simulation · LIVE trading disabled")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Backtrader, one bar at a time." })).toBeInTheDocument();
     expect(screen.getByText("Backtrader 1.9.78.123")).toBeInTheDocument();
     expect(screen.getByText("sma_cross · 1.0")).toBeInTheDocument();
@@ -157,7 +175,7 @@ describe("Execution page", () => {
       items: [{
         strategy_version_id: "a".repeat(64), strategy_id: "paper-aapl-limit-integration-test",
         source_kind: "python_upload", instrument_ids: ["AAPL"], execution_order_type: "limit",
-        execution_time_in_force: "DAY", position_mode: "explicit_quantity", run_id: "paper-integration-test",
+        execution_time_in_force: "DAY", position_mode: "explicit_quantity", frozen_quantity: 1, run_id: "paper-integration-test",
         backtest_status: "verified", backtest_report_sha256: "b".repeat(64), data_manifest_hash: "c".repeat(64),
         evaluation_start: "2026-10-30", evaluation_end: "2026-10-30", paper_deployable: true, currently_deployed: true, paper_block_reasons: [],
       }, {
@@ -175,6 +193,7 @@ describe("Execution page", () => {
     expect(screen.getByText("AAPL · BUY 1 · LMT $400 · DAY · regular hours only")).toBeInTheDocument();
     expect(screen.getByText(/Frozen version has a verified Backtrader report/)).toBeInTheDocument();
     expect(await screen.findByText("paper-aapl-limit-integration-test")).toBeInTheDocument();
+    expect(screen.getByText("Frozen quantity: 1")).toBeInTheDocument();
     expect(screen.getByText("sma-cross-10-30")).toBeInTheDocument();
     expect(screen.getByText(/2026-11-02T14:30:00Z/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run the one-shot PAPER order" })).toBeDisabled();
@@ -182,6 +201,87 @@ describe("Execution page", () => {
     expect(screen.getByLabelText("Warm-up start")).toHaveValue("2026-10-29");
     expect(screen.getByLabelText("Evaluation end")).toHaveValue("2026-10-30");
     expect(api.runPaperIntegrationTest).not.toHaveBeenCalled();
+  });
+
+  it("checks a frozen order without claiming it can be submitted", async () => {
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
+      configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "STOPPED", control_state: null,
+      dispatch_gate_open: false, owner_lease_held: false, reason: null, last_error_code: null,
+    });
+    vi.mocked(api.getPaperStrategyCandidates).mockResolvedValue({
+      deployment_mode: "fixed_one_shot_paper_integration",
+      supported_order: { instrument: "AAPL", side: "BUY", quantity: 1, order_type: "LMT", limit_price: "400", time_in_force: "DAY" },
+      items: [{ strategy_version_id: "d".repeat(64), strategy_id: "msft-five",
+        source_kind: "python_upload", instrument_ids: ["MSFT"], execution_order_type: "limit",
+        execution_time_in_force: "DAY", position_mode: "explicit_quantity", frozen_quantity: 5,
+        frozen_limit_price: "200.00", run_id: "run-1", backtest_status: "verified",
+        backtest_report_sha256: "e".repeat(64), data_manifest_hash: "f".repeat(64),
+        evaluation_start: "2026-10-30", evaluation_end: "2026-10-30", paper_deployable: false,
+        currently_deployed: false, paper_block_reasons: ["instrument_outside_fixed_AAPL_test_scope"] }],
+    });
+    vi.mocked(api.previewPaperOrder).mockResolvedValue({
+      contract: { symbol: "MSFT", con_id: 272093, primary_exchange: "NASDAQ" },
+      live_risk_checked: false, ready_for_submission: false, order_submission_performed: false,
+    });
+    renderExecution();
+    fireEvent.click(await screen.findByRole("button", { name: "Check order evidence" }));
+    expect(screen.getByText("Verified backtest · check draft eligibility below")).toBeInTheDocument();
+    expect(screen.getByText("Why the fixed AAPL one-shot test is unavailable")).toBeInTheDocument();
+    await waitFor(() => expect(api.previewPaperOrder).toHaveBeenCalledWith({
+      run_id: "run-1", strategy_version_id: "d".repeat(64),
+      order: { instrument_id: "MSFT", side: "BUY", integer_qty: 5, order_type: "limit", time_in_force: "DAY", limit_price: "200.00" },
+    }));
+    expect(await screen.findByText(/live risk has not been checked and this order cannot be submitted yet/)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Check entry window and risk limits"));
+    vi.mocked(api.suggestPaperWindow).mockResolvedValue({ valid_from: "2026-11-02T14:30:00Z", valid_until: "2026-11-02T21:00:00Z" });
+    fireEvent.click(screen.getByRole("button", { name: "Use current or next market session" }));
+    await waitFor(() => expect(screen.getByLabelText("Entry start")).toHaveValue("2026-11-02T14:30:00Z"));
+    expect(screen.getByLabelText("Entry end")).toHaveValue("2026-11-02T21:00:00Z");
+    fireEvent.click(screen.getByRole("button", { name: "Check order evidence" }));
+    await waitFor(() => expect(api.previewPaperOrder).toHaveBeenLastCalledWith(expect.objectContaining({
+      setup: { valid_from: "2026-11-02T14:30:00Z", valid_until: "2026-11-02T21:00:00Z",
+        max_order_notional: "1000", max_gross_exposure: "10000", strategy_budget: "5000",
+        max_daily_loss: "500", max_orders_per_session: 5 },
+    })));
+    const draft = vi.mocked(api.previewPaperOrder).mock.calls.at(-1)![0] as Parameters<typeof api.savePaperOrderDraft>[0];
+    vi.mocked(api.savePaperOrderDraft).mockResolvedValue({ draft });
+    vi.mocked(api.getPaperOrderDraft).mockResolvedValue({ draft });
+    fireEvent.click(screen.getByRole("button", { name: "Save PAPER draft" }));
+    await waitFor(() => expect(api.savePaperOrderDraft).toHaveBeenCalledWith(draft));
+    expect(await screen.findByText(/Draft saved/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Entry start"), { target: { value: "changed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Restore PAPER draft" }));
+    await waitFor(() => expect(screen.getByLabelText("Entry start")).toHaveValue("2026-11-02T14:30:00Z"));
+    expect(screen.getByText(/Restored draft for run: run-1/)).toBeInTheDocument();
+    vi.mocked(api.deployPaperOrderDraft).mockResolvedValue({ strategy_version_id: "d".repeat(64),
+      run_id: "run-1", session_started: false, order_submission_performed: false });
+    fireEvent.click(screen.getByRole("button", { name: "Deploy saved PAPER draft" }));
+    await waitFor(() => expect(api.deployPaperOrderDraft).toHaveBeenCalled());
+    expect(await screen.findByText(/Draft deployed. The session has not started/)).toBeInTheDocument();
+    vi.mocked(api.runPaperOrderDraft).mockResolvedValue({ signal_enqueued: true, broker_order_confirmed: false });
+    fireEvent.click(screen.getByRole("button", { name: "Start PAPER and process initial signal" }));
+    await waitFor(() => expect(api.runPaperOrderDraft).toHaveBeenCalled());
+    expect(await screen.findByText(/Initial signal queued/)).toBeInTheDocument();
+    expect(api.runPaperIntegrationTest).not.toHaveBeenCalled();
+  });
+
+  it("offers stop retry while the account remains held", async () => {
+    const ready = {
+      configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "READY", control_state: "PAUSED",
+      dispatch_gate_open: false, owner_lease_held: true, reason: null, last_error_code: null,
+    };
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue(ready);
+    vi.mocked(api.stopPaperExecution)
+      .mockResolvedValueOnce({ ...ready, phase: "STOPPING", control_state: "STOPPING" })
+      .mockResolvedValueOnce({ ...ready, phase: "STOPPED", control_state: null, owner_lease_held: false });
+    renderExecution();
+    fireEvent.click(await screen.findByRole("button", { name: "Stop PAPER session" }));
+    expect(await screen.findByText(/Stopping is waiting for orders or callbacks/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry stopping PAPER session" }));
+    await waitFor(() => expect(api.stopPaperExecution).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry stopping PAPER session" })).not.toBeInTheDocument());
   });
 
   it("lets an attributable operator select a compatible frozen version without submitting an order", async () => {
@@ -219,7 +319,7 @@ describe("Execution page", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Use for this PAPER check" }));
 
-    await waitFor(() => expect(api.selectPaperStrategyCandidate).toHaveBeenCalledWith("d".repeat(64)));
+    await waitFor(() => expect(api.selectPaperStrategyCandidate).toHaveBeenCalledWith("d".repeat(64), "bt_compatible"));
     expect(api.runPaperIntegrationTest).not.toHaveBeenCalled();
   });
 
@@ -318,6 +418,112 @@ describe("Execution page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Cancel this PAPER order" }));
     await waitFor(() => expect(api.cancelPaperExecutionOrder).toHaveBeenCalledWith("intent-123"));
     expect(await screen.findByText(/Cancellation requested; check the broker status/)).toBeInTheDocument();
+  });
+
+  it("checks the local PAPER Gateway without starting a strategy", async () => {
+    vi.mocked(api.connectLocalPaperGateway).mockResolvedValue({ verified: true, environment: "paper", account_ref: "DU123",
+      connection: "Gateway", read_only_check: true });
+    renderExecution();
+    expect(await screen.findByText(/PAPER account verified \(read-only check\): DU123/)).toBeInTheDocument();
+    expect(api.connectLocalPaperGateway).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Check PAPER Gateway connection" }));
+    await waitFor(() => expect(api.connectLocalPaperGateway).toHaveBeenCalledTimes(2));
+    expect(api.startPaperExecution).not.toHaveBeenCalled();
+  });
+
+  it("explains a daily scheduling failure", async () => {
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
+      configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "READY", control_state: "PAUSED", dispatch_gate_open: false,
+      owner_lease_held: true, reason: "paper_daily_schedule_failed", last_error_code: null,
+    });
+    renderExecution();
+    expect(await screen.findByText(/Daily data could not be advanced safely/)).toBeInTheDocument();
+  });
+
+  it("explains why a paused draft needs a fresh start", async () => {
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue({
+      configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "READY", control_state: "PAUSED", dispatch_gate_open: false,
+      owner_lease_held: true, reason: "paper_daily_schedule_failed", last_error_code: null,
+    });
+    vi.mocked(api.getPaperIntegrationTestStatus).mockResolvedValue({ configured: false, enabled: false, window_open: false,
+      valid_window_utc: { start: "", end: "" }, symbol: "AAPL", side: "BUY", quantity: 1, order_type: "LMT",
+      limit_price: "400", time_in_force: "DAY", regular_trading_hours_only: true, max_notional_usd: "400",
+      strategy_version_id: "a".repeat(64), backtest_attestation: null });
+    vi.mocked(api.activatePaperExecution).mockRejectedValue(new ApiError("restart", 409, "paper_draft_requires_restart"));
+    renderExecution();
+    fireEvent.click(await screen.findByRole("button", { name: "Enable PAPER strategy" }));
+    expect(await screen.findByText("Stop the paused draft session and prepare a fresh backtest before starting again.")).toBeInTheDocument();
+  });
+
+  it("uses the discovered PAPER TWS endpoint for desktop upload history without a port selector", async () => {
+    window.vibeDesktop = { isDesktop: true } as NonNullable<Window["vibeDesktop"]>;
+    vi.mocked(api.connectLocalPaperGateway).mockResolvedValue({ verified: true, environment: "paper", account_ref: "DU123", connection: "TWS", read_only_check: true });
+    vi.mocked(api.previewIbkrPythonMarketData).mockRejectedValue(new Error("fixture complete"));
+    renderExecution();
+    expect(screen.queryByLabelText("Local API socket port")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Fetch daily bars from IBKR" }));
+    await waitFor(() => expect(api.previewIbkrPythonMarketData).toHaveBeenCalledWith(expect.objectContaining({
+      profile_id: "ibkr-paper-local", port: 7497,
+    })));
+  });
+
+  it("does not fetch desktop history when PAPER discovery fails", async () => {
+    window.vibeDesktop = { isDesktop: true } as NonNullable<Window["vibeDesktop"]>;
+    vi.mocked(api.previewIbkrPythonMarketData).mockClear();
+    renderExecution();
+    fireEvent.click(screen.getByRole("button", { name: "Fetch daily bars from IBKR" }));
+    expect(await screen.findByText(/no PAPER Gateway/)).toBeInTheDocument();
+    expect(api.previewIbkrPythonMarketData).not.toHaveBeenCalled();
+  });
+
+  it("uses the discovered PAPER endpoint for desktop template backtest preview", async () => {
+    window.vibeDesktop = { isDesktop: true } as NonNullable<Window["vibeDesktop"]>;
+    vi.mocked(api.connectLocalPaperGateway).mockResolvedValue({ verified: true, environment: "paper", account_ref: "DU123", connection: "TWS", read_only_check: true });
+    vi.mocked(api.previewExecutionBacktest).mockRejectedValue(new Error("fixture complete"));
+    renderExecution();
+    fireEvent.change(screen.getByLabelText("Data provider"), { target: { value: "ibkr" } });
+    expect(screen.queryByLabelText("Local API socket port")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Review strategy" }));
+    await waitFor(() => expect(api.previewExecutionBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      source: "ibkr", ibkr_profile_id: "ibkr-paper-local", ibkr_port: 7497,
+    })));
+  });
+
+  it("offers paused reconnection for stopped working orders", async () => {
+    const stopped = { configured: true, runtime_factory_registered: true, composition_ready: true,
+      missing_requirements: [], phase: "STOPPED", control_state: null, dispatch_gate_open: false,
+      owner_lease_held: false, reason: null, last_error_code: null };
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue(stopped);
+    vi.mocked(api.startPaperCancelRecovery).mockResolvedValue({ ...stopped, phase: "READY", control_state: "PAUSED", owner_lease_held: true });
+    vi.mocked(api.getPaperExecutionActivity).mockResolvedValue({ broker: "IBKR", environment: "paper", control_state: "PAUSED",
+      control_reason: "runtime_stopped_broker_snapshot_unavailable", history_limit: 50, latest_activity_seq: 1, orders: [],
+      recovery: { ready_to_reserve: 0, ready_to_send: 0, unresolved_sends: 0, active_orders: 1 },
+      risk: { source: "ledger_reservations_only", reserved_cash: "0", reserved_sell_shares: 0, risk_limits: "unavailable" },
+      positions: { source: "unknown", as_of: null, positions: [], reason: "no snapshot" } });
+    renderExecution();
+    fireEvent.click(await screen.findByRole("button", { name: "Reconnect to manage working PAPER orders" }));
+    await waitFor(() => expect(api.startPaperCancelRecovery).toHaveBeenCalledTimes(1));
+    expect(api.activatePaperExecution).not.toHaveBeenCalled();
+  });
+
+  it("offers saved deployment restoration after restart with working orders", async () => {
+    const idle = { configured: false, runtime_factory_registered: false, composition_ready: false,
+      missing_requirements: [], phase: "NOT_CONFIGURED", control_state: null, dispatch_gate_open: false,
+      owner_lease_held: false, reason: null, last_error_code: null };
+    vi.mocked(api.getPaperExecutionStatus).mockResolvedValue(idle);
+    vi.mocked(api.deployPaperOrderDraft).mockResolvedValue({ strategy_version_id: "a".repeat(64), run_id: "run-1",
+      session_started: false, order_submission_performed: false });
+    vi.mocked(api.getPaperExecutionActivity).mockResolvedValue({ broker: "IBKR", environment: "paper", control_state: "PAUSED",
+      control_reason: "runtime_stopped_broker_snapshot_unavailable", history_limit: 50, latest_activity_seq: 1, orders: [],
+      recovery: { ready_to_reserve: 0, ready_to_send: 0, unresolved_sends: 0, active_orders: 1 },
+      risk: { source: "ledger_reservations_only", reserved_cash: "0", reserved_sell_shares: 0, risk_limits: "unavailable" },
+      positions: { source: "unknown", as_of: null, positions: [], reason: "no snapshot" } });
+    renderExecution();
+    fireEvent.click(await screen.findByRole("button", { name: "Restore saved PAPER deployment" }));
+    await waitFor(() => expect(api.deployPaperOrderDraft).toHaveBeenCalled());
+    expect(api.startPaperCancelRecovery).not.toHaveBeenCalled();
   });
 
   it("subscribes after the activity snapshot cursor and refreshes on persisted events", async () => {

@@ -85,6 +85,23 @@ def test_paused_released_event_can_only_resume_with_its_exact_durable_identity(j
         journal.inspect_paused_released_event("run-1")
 
 
+def test_seeded_checkpoint_survives_first_event_retry_and_rejects_tampering(tmp_path):
+    journal = SQLiteEventJournal(tmp_path / "seeded.sqlite")
+    journal.create_run(run_id="seeded", deployment_id="deployment", account_ref="account",
+                       environment=Environment.PAPER, strategy_version_hash=VERSION_HASH,
+                       initial_checkpoint={"history": [1, 2]})
+    journal.stage_next_event("seeded", {"bar": {"close": 10}}, event_id="event")
+    event = journal.release_next_event("seeded")
+    journal.pause_run("seeded")
+    journal.resume_paused_released_event("seeded", expected_event_id=event.event_id, expected_seq=1,
+                                        expected_payload_sha256=event.payload_sha256)
+    assert journal.get_checkpoint("seeded") == {"history": [1, 2]}
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute("UPDATE execution_run SET checkpoint_json=? WHERE run_id='seeded'", ('{"history":[9]}',))
+    with pytest.raises(JournalError, match="checkpoint"):
+        journal.get_checkpoint("seeded")
+
+
 def test_paused_released_event_recovery_rejects_corrupt_payload_or_side_effects(journal):
     journal.stage_next_event("run-1", {"bar": {"close": 10}}, event_id="event-1")
     released = journal.release_next_event("run-1")

@@ -39,6 +39,17 @@ def _app(*, manager=None, readiness=None):
     return app
 
 
+def test_suggest_window_route_returns_calendar_window_without_starting_runtime(monkeypatch):
+    from datetime import datetime, timezone
+
+    start = datetime(2026, 11, 2, 14, 30, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 2, 21, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(paper_routes, "suggest_paper_entry_window", lambda _: (start, end))
+    response = TestClient(_app()).get("/api/execution/paper/suggest-window")
+    assert response.status_code == 200
+    assert response.json() == {"valid_from": start.isoformat(), "valid_until": end.isoformat()}
+
+
 def test_status_reports_inert_default_manager_without_account_details(monkeypatch):
     manager = PaperExecutionManager(runtime_factory=None)
     monkeypatch.setattr(api_server, "_get_paper_execution_manager", lambda: manager)
@@ -100,6 +111,278 @@ def test_activity_route_is_authenticated_bounded_and_uses_manager_scope_only():
     assert "attacker" not in response.text
     assert seen_limits == [7]
     assert client.get("/api/execution/paper/activity?limit=101").status_code == 422
+
+
+def test_order_preview_uses_trusted_paper_scope_and_never_authorizes_submission(tmp_path, monkeypatch):
+    from tests.execution.test_paper_strategy_candidates import _version, _write_run
+
+    version = _version(tmp_path)
+    _write_run(tmp_path, version)
+    monkeypatch.setattr(paper_routes, "get_runtime_root", lambda: tmp_path)
+    app = _app()
+    app.state.paper_execution_scope = PaperRuntimeScope("IBKR", "DU123", Environment.PAPER)
+    client = TestClient(app)
+    body = {
+        "run_id": "bt_20261031_120000_abcdef123456", "strategy_version_id": version.version_id,
+        "order": {"instrument_id": "AAPL", "side": "BUY", "integer_qty": 1,
+                  "order_type": "limit", "time_in_force": "DAY", "limit_price": "400"},
+    }
+    response = client.post("/api/execution/paper/order-preview", json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["contract"]["con_id"] == 265598
+    assert response.json()["live_risk_checked"] is False
+    assert response.json()["ready_for_submission"] is False
+    assert response.json()["order_submission_performed"] is False
+    assert "DU123" not in response.text
+    assert client.post("/api/execution/paper/order-preview", json={**body, "account_ref": "DU999"}).status_code == 422
+    bad = {**body, "order": {**body["order"], "integer_qty": 2}}
+    assert client.post("/api/execution/paper/order-preview", json=bad).status_code == 409
+    app.state.paper_execution_scope = None
+    assert client.post("/api/execution/paper/order-preview", json=body).status_code == 409
+
+
+def test_order_preview_checks_window_and_limits_without_authorizing(tmp_path, monkeypatch):
+    from tests.execution.test_paper_strategy_candidates import _version, _write_run
+
+    version = _version(tmp_path)
+    _write_run(tmp_path, version)
+    monkeypatch.setattr(paper_routes, "get_runtime_root", lambda: tmp_path)
+    app = _app()
+    app.state.paper_execution_scope = PaperRuntimeScope("IBKR", "DU123", Environment.PAPER)
+    client = TestClient(app)
+    setup = {"valid_from": "2026-11-02T14:30:00Z", "valid_until": "2026-11-02T21:00:00Z",
+             "max_order_notional": "400", "max_gross_exposure": "500", "strategy_budget": "500",
+             "max_daily_loss": "100", "max_orders_per_session": 2}
+    body = {"run_id": "bt_20261031_120000_abcdef123456", "strategy_version_id": version.version_id,
+            "order": {"instrument_id": "AAPL", "side": "BUY", "integer_qty": 1,
+                      "order_type": "limit", "time_in_force": "DAY", "limit_price": "400"}, "setup": setup}
+    response = client.post("/api/execution/paper/order-preview", json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["static_notional_checked"] is True
+    assert response.json()["ready_for_submission"] is False
+    assert response.json()["live_risk_checked"] is False
+    response = client.post("/api/execution/paper/order-preview", json={**body, "setup": {**setup, "max_order_notional": "399"}})
+    assert response.status_code == 409
+    assert "maximum order notional" in response.text
+    # November 27 is an early-close session, ending at 18:00 UTC.
+    response = client.post("/api/execution/paper/order-preview", json={**body, "setup": {
+        **setup, "valid_from": "2026-11-27T14:30:00Z", "valid_until": "2026-11-27T21:00:00Z"}})
+    assert response.status_code == 422
+
+
+def test_order_draft_persists_by_account_and_rechecks_backtest(tmp_path, monkeypatch):
+    from tests.execution.test_paper_strategy_candidates import _version, _write_run
+
+    version = _version(tmp_path)
+    report = _write_run(tmp_path, version)
+    monkeypatch.setattr(paper_routes, "get_runtime_root", lambda: tmp_path)
+    app = _app()
+    app.state.paper_execution_scope = PaperRuntimeScope("IBKR", "DU123", Environment.PAPER)
+    client = TestClient(app)
+    body = {"run_id": "bt_20261031_120000_abcdef123456", "strategy_version_id": version.version_id,
+            "order": {"instrument_id": "AAPL", "side": "BUY", "integer_qty": 1,
+                      "order_type": "limit", "time_in_force": "DAY", "limit_price": "400"},
+            "setup": {"valid_from": "2026-11-02T14:30:00Z", "valid_until": "2026-11-02T21:00:00Z",
+                      "max_order_notional": "400", "max_gross_exposure": "500", "strategy_budget": "500",
+                      "max_daily_loss": "100", "max_orders_per_session": 2}}
+    response = client.put("/api/execution/paper/order-draft", json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()["draft"]["ready_for_submission"] is False
+    assert "DU123" not in response.text
+    assert client.get("/api/execution/paper/order-draft").json()["draft"]["run_id"] == body["run_id"]
+    app.state.paper_execution_scope = PaperRuntimeScope("IBKR", "DU999", Environment.PAPER)
+    assert client.get("/api/execution/paper/order-draft").json()["draft"] is None
+    app.state.paper_execution_scope = PaperRuntimeScope("IBKR", "DU123", Environment.PAPER)
+    report.write_text("{}")
+    assert client.get("/api/execution/paper/order-draft").status_code == 409
+
+
+def test_draft_deployment_installs_host_composition_without_starting(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from src.execution.ibkr_paper_risk_facts import IbkrManagedRiskSnapshotSource
+    from src.execution.paper_draft_composition import build_paper_draft_composition
+    from src.execution.python_sandbox import PythonSandbox
+    from tests.execution.test_paper_strategy_candidates import _version, _write_run
+    from tests.execution.test_python_upload_paper_composition_factory import _runtime_config, _runtime_dependencies
+
+    version = _version(tmp_path)
+    _write_run(tmp_path, version)
+    monkeypatch.setattr(paper_routes, "get_runtime_root", lambda: tmp_path)
+    scope = PaperRuntimeScope("IBKR", "DU123", Environment.PAPER)
+    old_manager = PaperExecutionManager(runtime_factory=None)
+    old_manager.bind_stopped_activity(scope, SQLiteOrderLedger(tmp_path / "paper.sqlite"))
+    app = _app(manager=old_manager)
+    app.state.paper_execution_scope = scope
+    app.dependency_overrides[require_auth] = lambda: Principal(subject="partner", auth_method=AuthMethod.LOCAL_OPERATOR_TOKEN)
+    client = TestClient(app)
+    body = {"run_id": "bt_20261031_120000_abcdef123456", "strategy_version_id": version.version_id,
+            "order": {"instrument_id": "AAPL", "side": "BUY", "integer_qty": 1,
+                      "order_type": "limit", "time_in_force": "DAY", "limit_price": "400"},
+            "setup": {"valid_from": "2026-11-02T14:30:00Z", "valid_until": "2026-11-02T21:00:00Z",
+                      "max_order_notional": "400", "max_gross_exposure": "500", "strategy_budget": "500",
+                      "max_daily_loss": "100", "max_orders_per_session": 2}}
+    assert client.put("/api/execution/paper/order-draft", json=body).status_code == 200
+    assert client.post("/api/execution/paper/order-draft/deploy").status_code == 409
+    def factory(actual_scope, principal):
+        return build_paper_draft_composition(
+        runtime_root=tmp_path, scope=actual_scope, runtime_config=_runtime_config(tmp_path, "DU123"),
+        runtime_dependencies=_runtime_dependencies(), sandbox=PythonSandbox("sha256:" + "a" * 64),
+        control_authorizer=lambda *_: False, snapshot_reader=IbkrManagedRiskSnapshotSource(account_ref="DU123"),
+        quote_reader=lambda _: {}, fx_quote_reader=lambda _: {}, metrics_reader=None, fx_contract_ids={},
+        now=lambda: datetime(2026, 11, 2, 13, 0, tzinfo=timezone.utc), run_id="draft-run",
+        deployment_id="deployment", user_action_id=principal.subject, previous_bar_reader=lambda *_: None,
+        price_buffer_fraction=Decimal("0.05"), estimated_fees=Decimal("1"),
+        )
+    def mismatched_factory(actual_scope, principal):
+        composition = factory(actual_scope, principal)
+        provider = composition.manager.runtime_factory.session_builder.dispatch_risk_facts
+        provider.risk_grant = provider.risk_grant.model_copy(update={"max_order_notional": Decimal("999")})
+        return composition
+    app.state.paper_draft_composition_factory = mismatched_factory
+    assert client.post("/api/execution/paper/order-draft/deploy").status_code == 409
+    assert app.state.paper_execution_manager is old_manager
+    app.state.paper_draft_composition_factory = factory
+    response = client.post("/api/execution/paper/order-draft/deploy")
+    assert response.status_code == 200, response.text
+    assert response.json()["session_started"] is False
+    assert response.json()["order_submission_performed"] is False
+    assert app.state.paper_execution_manager is not old_manager
+    assert app.state.paper_execution_manager.status() is None
+    # Slow warmup must not freeze status requests, and a scope change during
+    # that work must prevent the prepared composition from being installed.
+    import asyncio
+    import httpx
+    started, release = threading.Event(), threading.Event()
+    def slow_factory(actual_scope, principal):
+        started.set()
+        if not release.wait(3):
+            raise RuntimeError("fixture timeout")
+        return factory(actual_scope, principal)
+    app.state.paper_draft_composition_factory = slow_factory
+    previous_manager = app.state.paper_execution_manager
+    async def concurrent_deploy(mutation):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as async_client:
+            pending = asyncio.create_task(async_client.post("/api/execution/paper/order-draft/deploy"))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                status = await asyncio.wait_for(async_client.get("/api/execution/paper/status"), timeout=1)
+                assert status.status_code == 200
+                with previous_manager._lock:
+                    if mutation == "scope":
+                        app.state.paper_execution_scope = PaperRuntimeScope("IBKR", "DU456", Environment.PAPER)
+                    elif mutation == "lifecycle":
+                        previous_manager._lifecycle_generation += 1
+                    else:
+                        previous_manager._configuration_generation += 1
+            finally:
+                release.set()
+            result = await asyncio.wait_for(pending, timeout=3)
+            assert result.status_code == 409
+    for mutation in ("scope", "lifecycle", "configuration"):
+        started.clear()
+        release.clear()
+        asyncio.run(concurrent_deploy(mutation))
+        assert app.state.paper_execution_manager is previous_manager
+        app.state.paper_execution_scope = scope
+    # Simulate a later process with durable working-order history and no active
+    # runtime. Only the exact deployment may be installed for recovery.
+    from src.execution.order_ledger import BrokerEventKind
+    from tests.execution.test_order_ledger import intent, report
+    ledger = SQLiteOrderLedger(tmp_path / "paper.sqlite")
+    working = ledger.create_intent(intent(broker="IBKR", account_ref="DU123", deployment_id="deployment",
+                                         strategy_version_hash=version.version_id))
+    ledger.reserve(working.intent_id, "restore-reservation", "123.45")
+    ledger.start_send(working.intent_id, attempt_id="restore-attempt", client_order_id="restore-client")
+    ledger.record_broker_event(report(working.intent_id, BrokerEventKind.ACK, "restore-ack", broker="IBKR",
+                                      account_ref="DU123", broker_order_id="77"))
+    restarted_manager = PaperExecutionManager(runtime_factory=None)
+    restarted_manager.bind_stopped_activity(scope, SQLiteOrderLedger(tmp_path / "paper.sqlite"))
+    app = _app(manager=restarted_manager)
+    app.state.paper_execution_scope = scope
+    app.dependency_overrides[require_auth] = lambda: Principal(subject="partner", auth_method=AuthMethod.LOCAL_OPERATOR_TOKEN)
+    client = TestClient(app)
+    previous = app.state.paper_execution_manager
+    def wrong_deployment(actual_scope, principal):
+        replacement = factory(actual_scope, principal)
+        replacement.manager.runtime_factory.session_builder.deployment_id = "different"
+        return replacement
+    app.state.paper_draft_composition_factory = wrong_deployment
+    assert client.post("/api/execution/paper/order-draft/deploy").status_code == 409
+    assert app.state.paper_execution_manager is previous
+    app.state.paper_draft_composition_factory = factory
+    response = client.post("/api/execution/paper/order-draft/deploy")
+    assert response.status_code == 200, response.text
+    assert response.json()["matching_working_orders"] == 1
+    assert response.json()["session_started"] is False
+    current = app.state.paper_execution_manager
+    ledger.create_intent(intent(broker="IBKR", account_ref="DU123", deployment_id="deployment",
+                                strategy_version_hash=version.version_id, decision_id="unresolved-draft"))
+    assert client.post("/api/execution/paper/order-draft/deploy").status_code == 409
+    assert app.state.paper_execution_manager is current
+
+
+def test_draft_run_uses_installed_composition_and_deployment_respects_runner_lock():
+    manager = PaperExecutionManager(runtime_factory=None)
+    app = _app(manager=manager)
+    app.state.paper_execution_scope = PaperRuntimeScope("IBKR", "DU123", Environment.PAPER)
+    app.state.paper_draft_composition_factory = lambda *_: None
+    principal = Principal(subject="partner", auth_method=AuthMethod.LOCAL_OPERATOR_TOKEN)
+    app.dependency_overrides[require_auth] = lambda: principal
+    class Runner:
+        def __init__(self):
+            self._lock = threading.Lock()
+        def __call__(self, actual_principal, *, is_current):
+            assert actual_principal is principal and is_current()
+            return {"signal_enqueued": True, "broker_order_confirmed": False}
+    runner = Runner()
+    app.state.paper_execution_composition = SimpleNamespace(manager=manager, draft_runner=runner)
+    client = TestClient(app)
+    assert client.post("/api/execution/paper/order-draft/run").json()["signal_enqueued"] is True
+    with runner._lock:
+        response = client.post("/api/execution/paper/order-draft/deploy")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "a PAPER action is in progress"
+
+
+def test_connect_discovers_readonly_paper_account_and_binds_history(tmp_path, monkeypatch):
+    from src.trading.connectors.ibkr import local
+    from src.trading.connectors.ibkr.local import IBKRLocalConfig
+
+    detected = IBKRLocalConfig(profile="paper", host="127.0.0.1", port=4002, account="DU123", readonly=True)
+    monkeypatch.setattr(paper_routes, "discover_local_paper_gateway", lambda: detected)
+    monkeypatch.setattr(paper_routes, "get_runtime_root", lambda: tmp_path)
+    monkeypatch.setattr(local, "load_config", lambda: IBKRLocalConfig())
+    saved = []
+    monkeypatch.setattr(local, "save_config", lambda config: saved.append(config))
+    manager = PaperExecutionManager(runtime_factory=None)
+    app = _app(manager=manager)
+    app.dependency_overrides[require_auth] = lambda: Principal("desktop-profile:partner", AuthMethod.LOCAL_DESKTOP_PROFILE)
+    client = TestClient(app)
+    response = client.post("/api/execution/paper/connect")
+    assert response.status_code == 200, response.text
+    assert response.json()["account_ref"] == "DU123" and response.json()["read_only_check"] is True
+    assert app.state.paper_execution_scope.account_ref == "DU123"
+    assert manager.status() is None and saved[0].readonly is True and saved[0].port == 4002
+    assert client.get("/api/execution/paper/activity").status_code == 200
+    monkeypatch.setattr(paper_routes, "discover_local_paper_gateway", lambda: IBKRLocalConfig(
+        profile="paper", host="127.0.0.1", port=4002, account="DU456", readonly=True))
+    assert client.post("/api/execution/paper/connect").status_code == 409
+    assert len(saved) == 1
+
+
+def test_cancel_recovery_route_uses_trusted_scope_and_authenticated_actor():
+    manager = PaperExecutionManager(runtime_factory=None)
+    app = _app(manager=manager)
+    scope = PaperRuntimeScope("IBKR", "DU123", Environment.PAPER)
+    principal = Principal(subject="partner", auth_method=AuthMethod.LOCAL_OPERATOR_TOKEN)
+    app.state.paper_execution_scope = scope
+    app.dependency_overrides[require_auth] = lambda: principal
+    calls = []
+    manager.start_for_cancel_recovery = lambda actual_scope, actor: calls.append((actual_scope, actor))
+    response = TestClient(app).post("/api/execution/paper/cancel-recovery/start?account_ref=DU999")
+    assert response.status_code == 200
+    assert calls == [(scope, principal)]
 
 
 def test_stopped_activity_route_reads_only_trusted_scope_without_broker_connection(tmp_path):
@@ -855,6 +1138,17 @@ def test_active_management_routes_pass_authenticated_principal_and_manager_scope
     assert [call[0] for call in calls] == ["recover", "activate", "cancel", "stop"]
     assert all(call[1][0] == scope for call in calls)
     assert all(call[1][-1] == principal for call in calls)
+
+
+def test_paused_draft_cannot_be_reactivated_without_restarting_scheduler():
+    scope = PaperRuntimeScope("IBKR", "DU123", Environment.PAPER)
+    manager = SimpleNamespace(status=lambda: SimpleNamespace(scope=scope),
+        activate=lambda *_: pytest.fail("must not reactivate without a scheduler"))
+    app = _app(manager=manager)
+    app.state.paper_execution_composition = SimpleNamespace(manager=manager, draft_runner=object())
+    response = TestClient(app).post("/api/execution/paper/activate")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "paper_draft_requires_restart"
 
 
 def test_recover_route_uses_active_scope_and_returns_paused_without_request_body():

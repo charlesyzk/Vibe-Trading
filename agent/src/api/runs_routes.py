@@ -2113,7 +2113,8 @@ def register_runs_routes(
     @app.post("/runs/backtests/python-upload/preview", dependencies=[Depends(require_auth)])
     async def preview_python_upload_backtest(request: PythonUploadBacktestRequest):
         """Validate source and imported data, then bind a short-lived confirmation token."""
-        image = os.environ.get("VIBE_PYTHON_WORKER_IMAGE", "").strip()
+        from src.execution.python_worker_factory import configured_worker_identity
+        image = configured_worker_identity()
         import_token_to_consume = request.ibkr_import_token
         try:
             paper_import_attestation = _verified_ibkr_paper_import(request)
@@ -2220,7 +2221,9 @@ def register_runs_routes(
     @app.post("/runs/backtests/python-upload", dependencies=[Depends(require_auth)])
     async def create_python_upload_backtest(request: PythonUploadBacktestConfirmationRequest):
         """Run the exact source/data/parameters reviewed in a fresh upload preview."""
-        image = os.environ.get("VIBE_PYTHON_WORKER_IMAGE", "").strip()
+        from src.execution.python_worker_factory import configured_worker_identity, create_worker
+        from src.execution.python_sandbox import PythonSandboxError
+        image = configured_worker_identity()
         if not image:
             raise HTTPException(status_code=503, detail="Python strategy worker image is not configured")
         if not request.preview_token:
@@ -2252,12 +2255,11 @@ def register_runs_routes(
             raise HTTPException(status_code=409, detail="Python upload preview snapshot failed integrity validation") from exc
         try:
             from src.bt_runtime.strategies.python_upload_service import run_python_upload_service
-            from src.execution.python_sandbox import PythonSandbox
             from src.execution.versions import StrategyVersionStore
 
             prepared = _prepare_python_upload(request, worker_image=image)
-            sandbox = PythonSandbox(image)  # Validate immutable image identity before consuming the token.
-        except (ValueError, TypeError) as exc:
+            sandbox = create_worker(image)  # Validate immutable identity before consuming the token.
+        except (ValueError, TypeError, PythonSandboxError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if not _consume_preview_token(request.preview_token, prepared["review_hash"]):
             raise HTTPException(status_code=409, detail="Python upload inputs changed or the preview token expired")
@@ -2382,7 +2384,8 @@ def register_runs_routes(
             raise HTTPException(status_code=409, detail="Only Python upload Backtrader backtests can be resumed")
         if state.get("status") not in {"running", "failed"}:
             raise HTTPException(status_code=409, detail="Only incomplete backtest runs can be resumed")
-        image = os.environ.get("VIBE_PYTHON_WORKER_IMAGE", "").strip()
+        from src.execution.python_worker_factory import configured_worker_identity, create_worker
+        image = configured_worker_identity()
         if not image:
             raise HTTPException(status_code=503, detail="Python strategy worker image is not configured")
         try:
@@ -2391,14 +2394,13 @@ def register_runs_routes(
                 run_python_upload_service,
             )
             from src.bt_runtime.backtest_event_journal import BacktestJournalError
-            from src.execution.python_sandbox import PythonSandbox
             from src.execution.strategy_source_policy import StrategySourcePolicyError, validate_strategy_source
             from src.execution.versions import StrategyVersionStore
 
             saved = load_python_upload_resume_inputs(run_dir)
             if run_config.get("worker_image") != image:
                 raise HTTPException(status_code=409, detail="configured Python worker image differs from the frozen run")
-            sandbox = PythonSandbox(image)
+            sandbox = create_worker(image)
             versions = StrategyVersionStore(run_dir.parent.parent / "strategy-versions")
             version = versions.get_version(saved["version_id"])
             try:

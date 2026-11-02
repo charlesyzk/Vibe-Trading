@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -48,6 +49,22 @@ def test_verified_official_source_tree_matches_exact_file_hash_and_version(tmp_p
     (source / "ibapi" / "client.py").write_text("class EClient: pass  # changed\n", encoding="utf-8")
     with pytest.raises(ValueError, match="does not match the pinned release"):
         installer.verify_source(source, lock)
+
+
+def test_source_tree_digest_uses_case_sensitive_portable_path_order(tmp_path):
+    source = _source_tree(tmp_path)
+    (source / "ibapi" / "Z.py").write_bytes(b"upper")
+    (source / "ibapi" / "alpha.py").write_bytes(b"lower")
+    digest = hashlib.sha256()
+    files = ["setup.py", "ibapi/Z.py", "ibapi/__init__.py", "ibapi/alpha.py", "ibapi/client.py"]
+    for relative in files:
+        encoded = relative.encode("utf-8")
+        contents = (source / relative).read_bytes()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(contents).to_bytes(8, "big"))
+        digest.update(contents)
+    assert installer.source_tree_sha256(source) == (digest.hexdigest(), len(files))
 
 
 def test_source_tree_rejects_symlinks_even_when_the_target_is_inside_the_tree(tmp_path):

@@ -50,6 +50,7 @@ def prepare_paper_strategy_selection(
     version_id: str,
     *,
     operator_subject: str,
+    run_id: str | None = None,
     runtime_root: str | Path | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -64,6 +65,8 @@ def prepare_paper_strategy_selection(
         raise PaperStrategyDeploymentError("strategy version must be a lowercase SHA-256 id")
     if not isinstance(operator_subject, str) or not operator_subject.strip():
         raise PaperStrategyDeploymentError("an attributable operator subject is required")
+    if run_id is not None and (not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id)):
+        raise PaperStrategyDeploymentError("candidate run id is invalid")
     instant = now or datetime.now(timezone.utc)
     if instant.tzinfo is None or instant.utcoffset() is None:
         raise PaperStrategyDeploymentError("selection timestamp must include a timezone")
@@ -77,7 +80,7 @@ def prepare_paper_strategy_selection(
         raise PaperStrategyDeploymentError("fixed PAPER integration config is unavailable") from exc
     candidate = next(
         (item for item in list_paper_strategy_candidates(runtime_root=root)["items"]
-         if item["strategy_version_id"] == version_id),
+         if item["strategy_version_id"] == version_id and (run_id is None or item["run_id"] == run_id)),
         None,
     )
     if candidate is None:
@@ -86,7 +89,11 @@ def prepare_paper_strategy_selection(
         raise PaperStrategyDeploymentError("candidate report or strategy policy is outside the fixed PAPER envelope")
 
     version = StrategyVersionStore(root / "strategy-versions").get_version(version_id)
-    report_path, report_sha256 = _resolve_report(root, version, candidate["run_id"])
+    report_path, report_sha256 = _resolve_report(
+        root, version, candidate["run_id"], expected_sha256=candidate["backtest_report_sha256"]
+    )
+    if report_sha256 != candidate["backtest_report_sha256"]:
+        raise PaperStrategyDeploymentError("candidate report changed during selection")
     backtest_dir = root / "paper-integration-test" / "backtests"
     _ensure_private_directory(backtest_dir)
     filename = f"{instant.strftime('%Y%m%dT%H%M%SZ')}-{version_id}.json"
@@ -95,13 +102,16 @@ def prepare_paper_strategy_selection(
         raise PaperStrategyDeploymentError("deployment report destination already exists")
     _atomic_copy_report(report_path, target)
     try:
+        if hashlib.sha256(target.read_bytes()).hexdigest() != report_sha256:
+            raise PaperStrategyDeploymentError("candidate report changed during selection")
         attestation = write_paper_backtest_attestation(target, version_id=version_id)
         # Read-after-write validates that the deployment will load the same
         # report from the location used by the app composition.
-        verify_paper_backtest_attestation(backtest_dir, version=version)
+        verify_paper_backtest_attestation(backtest_dir, version=version, report_sha256=report_sha256)
         previous_bytes = config_path.read_bytes()
         updated_data = current.model_dump(mode="json")
         updated_data["strategy_version_id"] = version_id
+        updated_data["backtest_report_sha256"] = report_sha256
         updated = type(current).model_validate(updated_data)
         write_paper_integration_test_config(updated, config_path)
     except Exception:
@@ -187,13 +197,14 @@ def paper_execution_ledger_is_empty(runtime_root: str | Path | None = None) -> b
     return True
 
 
-def _resolve_report(root: Path, version: StrategyVersionRecord, run_id: str) -> tuple[Path, str]:
+def _resolve_report(root: Path, version: StrategyVersionRecord, run_id: str, *, expected_sha256: str) -> tuple[Path, str]:
     if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
         raise PaperStrategyDeploymentError("candidate run id is invalid")
     if run_id == "paper-integration-test":
         evidence = verify_paper_backtest_attestation(
             root / "paper-integration-test" / "backtests",
             version=version,
+            report_sha256=expected_sha256,
         )
         path = evidence.report_path
     else:
@@ -216,7 +227,7 @@ def _resolve_report(root: Path, version: StrategyVersionRecord, run_id: str) -> 
             or report.get("strategy_id") != version.strategy_id
             or report.get("execution_backend") != "backtrader"
             or report.get("execution_mode") != "backtest"
-            or report.get("instrument_id") != "AAPL"
+            or report.get("instrument_id") not in version.spec.instrument_ids
             or report.get("source_kind") != version.source_kind.value
             or (report.get("execution_integrity") or {}).get("status") != "verified"
         ):

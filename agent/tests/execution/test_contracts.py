@@ -203,6 +203,8 @@ def test_risk_grant_requires_explicit_scope_hash_and_bounded_window():
         RiskGrant(**{**grant.model_dump(), "strategy_version_hash": "not-a-hash"})
     with pytest.raises(ValidationError):
         RiskGrant(**{**grant.model_dump(), "valid_until": start})
+    with pytest.raises(ValidationError):
+        RiskGrant(**{**grant.model_dump(), "granted_at": grant.valid_until})
 
 
 def test_bar_and_manifest_validate_time_quality_ranges_and_synthetic_provenance():

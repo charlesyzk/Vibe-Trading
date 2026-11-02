@@ -1,3 +1,568 @@
+# B356 伙伴使用手册细化
+
+- 增加首次使用顺序、AAPL 2 股示例及每标的独立草稿说明，按实际页面按钮列出上传、拉取日线、预览回测、证据核对和部署流程，补充风险字段及常见问题。两份源码手册一致；新版手册另复制到 B352 安装包旁。B352 exe 内仍为构建时手册，独立 HTML 是新版。真实 Gateway 与订单回报仍待验收。
+
+# B355 交付记录复核
+
+- 两份 PAPER 手册经 `cmp` 一致，`git diff --check` 通过。真实 Gateway PAPER 连接仍无成功证据；真实订单回报依约由伙伴后续验证。
+
+# B354 SDK 许可证文本核对
+
+- 构建快照 `eaefd62933341d7cf750a711c1237779fcad0d55:vendor/ibapi/LICENSE` 的文本标题为 GNU GPL version 3；B353 证明新版安装包包含该许可证文件和 SDK Python 源文件。该事实不足以判断全部依赖及整个应用的适用条款和分发义务，仍需独立审阅；不将文件存在等同许可证审阅完成。
+
+# B353 新版安装包内容检查
+
+- 私有 Actions `41395038654` 核对 `41378682142` 安装包哈希并检查 NSIS 内部归档：确认含 IBAPI 许可证、官方 client.py 和独立 runtime worker.py。该检查证明文件存在，不等同完整的分发许可审阅或 Gateway 连接验证。未发送订单。
+
+# B352 本机新版安装器校验
+
+- 完整安装器已下载至 `vibe-trading-output/windows-paper-review-41378682142/Vibe-Trading-Desktop-Unofficial-0.3.0-x64.exe`，`shasum -a 256` 为 `3b810be0d4c703c44d11d1f42b06a5866df5c7ec6997893a58316871c1e8e374`，与私有附件及 Windows 构建校验一致。真实 PAPER Gateway 连接及行情仍待验证；真实订单验证留给伙伴。
+
+# B351 私有附件转存
+
+- 私有 run `41391609790` 完成安装包副本校验并上传草稿附件；exe metadata SHA-256 `3b810be0d4c703c44d11d1f42b06a5866df5c7ec6997893a58316871c1e8e374`，大小 381935433 字节。本机下载与独立校验进行中；草稿未公开发布。
+
+# B350 Windows 新包验证通过
+
+- 私有 Windows run `41378682142`（应用快照 `eaefd62933341d7cf750a711c1237779fcad0d55`）打包测试 **120 passed、97 warnings**；干净安装、启动、同版本重装及配置保留通过。新包含 B345 的 202 通知修复，B347 测试扩展不在该快照。本机下载及哈希核对进行中。
+- 私有附件转存 `41381075995`、`41381226508` 校验安装器通过，但创建草稿时 Actions token 返回 HTTP 403；已用本地认证创建私有草稿，另运行 `41391609790` 上传。没有发送真实订单。
+
+# B349 新包传输准备
+
+- 已在私有构建分支快照 `955fdb4` 准备好针对 `41378682142` 的草稿附件传输 workflow；尚未运行，须先等待该构建整体结果。旧安装器保持仅供 review，不替代含 B345 修复的新包。
+
+# B348 撤单通知修复的 Windows 测试
+
+- Windows run `41378682142` 的打包运行、回测与 callback 测试步骤通过，已进入干净安装及同版本重装；测试数量和整体结果待终态日志。真实 Gateway 未验证，未发订单。
+
+# B347 部分成交后的 202 顺序
+
+- 扩展已有部分成交撤单测试：成交 4 股后收到 202 通知仍保持 `CANCEL_PENDING`，正式 `Cancelled` 状态到达后确认撤单且保留已成交数量。本机 callback pump **68 passed**，`git diff --check` 通过。该项是测试改动，运行中的 Windows 快照早于此测试扩展；真实券商顺序仍未验证。
+- 扩展后的测试已同步至私有分支快照 `406263a`；运行中的 `41378682142` 使用先前 `eaefd62`，应用代码一致但不包含该新增测试步骤。
+
+# B346 Windows 构建输入核对
+
+- 对工作区 115 个已改动或新增的非证据文档文件与私有构建快照 `eaefd62` 逐字节比较，差异为 0；`41378682142` 仍在构建。此检查仅证明输入一致，不替代新包测试、安装或真实 Gateway 验收。
+
+# B345 IBKR 202 通知与撤单状态
+
+- 官方文档将 202 描述为订单取消通知；此前它会被当作未分类错误暂停，可能阻断随后到达的正式订单状态。现仅在通知的 order ID 命中当前 PAPER 账户的持久绑定时作为通知接收，不直接确认撤单或释放预留；`Cancelled`/`ApiCancelled` 状态仍负责确认。未知订单和其他账户通知继续暂停。
+- 回调测试与跨日纵向测试本机 **69 passed、63 warnings**；覆盖通知先于取消状态、未知订单及跨账户。Windows 快照 `eaefd62` 的 `41378682142` 已启动，包含完整 callback 测试；B342 安装器早于此修复，不能作为新版本交付。真实 Gateway 回调仍未验证，未发订单。
+
+# B344 安装器内 SDK 与许可证检查
+
+- 私有 Actions `41378133169` 对 B332 实际安装器先校验 SHA-256，再解开 NSIS 及内部 7z 并检查目录：存在 `ibkr-runtime/IBAPI-LICENSE.txt`、官方 `ibapi/client.py` 与独立 runtime `worker.py`。构建脚本从官方 SDK 源码复制 `ibapi` 目录并携带提供的 GPLv3 许可证；该内容检查不等于对全部依赖及分发义务的法律审查，也不证明 Gateway 连接。未发送订单。
+
+# B343 IBKR 错误码文档核对
+
+- 只读查阅 IBKR 官方 [message codes](https://interactivebrokers.github.io/tws-api/message_codes.html)：202 描述 IB 服务器上的活动订单被取消；10148 描述试图撤销已经成交的订单。当前 callback pump 对 10148 保持结果未知并要求对账，202 仍按未分类错误暂停，不把错误文本当成成交或撤单状态。该文档核对不证明真实 Gateway 的回调顺序、账户绑定或撤单结果；未发订单。
+
+# B342 安装器本机哈希核验
+
+- B332 安装器已通过续传下载并复制至 `/Users/yaozekun/strategy_verification/vibe-trading-output/windows-paper-review-41368955377/Vibe-Trading-Desktop-Unofficial-0.3.0-x64.exe`；对复制后的文件执行 `shasum -a 256` 得到 `4339f28cf3f1cd520b56789b2efd813089f767f52e0cfa19dfdda213b03ffbb1`，与 Windows 构建和私有附件 metadata 一致。文件为未签名 review 安装器，真实 PAPER Gateway 连接与订单回报尚未验收。
+
+# B341 缺失数据块续传
+
+- 分段下载因部分范围三次连接超时结束，保留 28 个完整块；原下载前缀与重叠块已比较一致。已启动续传，仅补齐尚未覆盖的范围，最终仍须完整 SHA-256 与 B332 一致后才能使用；原下载保持运行。
+
+# B340 下载前缀交叉检查
+
+- 对原附件下载前缀与分段下载中已完成且重叠的 13 个 8 MiB 数据块逐字节比较，均一致。两条下载仍未完成，部分分段多次连接超时；一致性检查不能替代完整 exe 的 SHA-256。
+
+# B339 草稿附件分段下载
+
+- 私有草稿附件的 1 MiB range 试读返回 206 且长度正确，已并行分段下载相同 exe，并在全部分段完成后自动对照 B332 构建哈希；原完整下载保持运行。两者均尚未完成，不能将局部分段作为安装包。
+
+# B338 Gateway 本机配置只读检查
+
+- 只读检查本机 Gateway 配置，发现已配置本机信任地址；此静态配置不证明登录或 API 握手可用，B333 账户发现失败仍未解决。未修改 Gateway 配置或发送订单。B337 本机草稿附件下载继续进行。
+
+# B337 私有草稿附件建立
+
+- 私有 Actions `41373155904` 成功：B332 artifact 副本哈希核验后附到私有草稿发行 `paper-review-41368955377`，未公开发布。GitHub 附件 metadata 的 exe SHA-256 与构建日志一致，均为 `4339f28cf3f1cd520b56789b2efd813089f767f52e0cfa19dfdda213b03ffbb1`；本机通过草稿附件下载仍在运行，尚未完成本地校验。
+
+# B336 产物副本校验和传输重试
+
+- 私有 runner `41372790366` 下载 B332 artifact 并执行 `sha256sum -c`，安装器校验通过；随后创建私有草稿失败，原因是 GitHub 拒绝短提交号（422），未完成草稿附件。已改用完整提交号并启动 `41373155904`。此为另一个 runner 的副本校验，本机安装器下载仍未完成。
+
+# B335 私有草稿附件传输
+
+- 本机原下载与分段下载持续低速或超时，新增私有验证仓库专用 workflow `41372790366`，将在 runner 校验同一 artifact 后附至私有草稿发行，尝试另一下载端点；未公开发布。该流程仅为传输，不改变安装器或弥补真实 Gateway 验收。
+
+# B334 安装器下载网络诊断
+
+- 原 `gh run download` 保持运行，临时归档已收到约 12 MB；私有 artifact 支持 HTTP range，但另行分段下载遭遇读取超时和连接重置，目前未取得完整安装器。两种下载仍在运行；不能用局部数据或构建日志代替本地 SHA-256 核对。
+
+# B333 Gateway 只读复验
+
+- 发现本机 4002 监听进程与 B322 不同，重新运行 35 秒上限的只读 PAPER 发现，仍返回 `PaperGatewayDiscoveryError: PAPER connection could not be verified; check Gateway login and API settings`。未获得可核验账户，未发送订单。
+- B332 私有 artifact `13108114747` 存在、未过期，归档大小 380,613,002 字节；本机下载进程仍在运行，尚未完成哈希核对。
+
+# B332 最新 Windows 快照测试及安装通过
+
+- 私有 Windows run `41368955377`（快照 `5d1e4d2`）成功：打包 worker、回测、跨日调度和 fake 券商纵向测试 **52 passed、95 warnings**，pytest 返回时仅主线程；干净安装、启动、同版本重装和配置保留通过。等待回调排空后测试正常停止，该结果不证明真实 Gateway 行情或订单回报。
+- 构建日志记录安装器 SHA-256 `4339f28cf3f1cd520b56789b2efd813089f767f52e0cfa19dfdda213b03ffbb1`；本机下载仍在运行，尚不能称本地哈希已核对。
+- 安装器下载及本机 SHA-256 核对进行中。真实 PAPER Gateway 只读连接仍未核验；真实 PAPER ACK、成交及对账依用户决定由伙伴后续验证。未发送真实订单。
+
+# B331 Windows 测试退出及新手册包安装
+
+- Windows `41368955377` 的打包运行测试步骤通过并正常退出，已进入干净安装和重装；具体测试数量待完整日志。该快照包含测试等待 durable callback 排空的修改，但不证明真实 Gateway。
+- 独立 Windows retest `41368929067` 校验并安装 `41313209200` 的新手册安装包，干净安装、启动、同版本重装及配置保留通过。它不将 `41313209200` 的超时测试步骤改为成功；本机下载及哈希复核仍在进行。没有真实券商订单。
+
+# B330 Windows 停止时序定位
+
+- Windows `41314851988` 的 pytest 52 passed，但停止未被断言，退出时仍有 callback pump、health 和 managed Cerebro 三个非守护线程；进程超时失败。`41315105231` 恢复断言后为 51 passed、1 failed：首次 `manager.stop` 返回 False，finally 重试后线程退出。完整 Gateway 未参与。
+- 假成交的 Backtrader 持仓更新可先于 durable inbox ACK；测试此前一看到持仓就停止，可能与回调处理竞争。测试现等待 pending inbox/spool 清空再验证首次停止，未修改产品停止安全条件；本机纵向与调度 7 passed、101 warnings，`git diff --check` 通过。Windows 快照 `5d1e4d2` 的 `41368955377` 已启动，原因仍需 Windows 复验证实。
+- 包含新手册的 `41313209200` 测试同样输出 52 passed 后超时，安装被跳过；独立安装重装 run `41368929067` 针对其实际产物启动，尚无结果。
+
+# B329 恢复断言的 Windows 构建
+
+- 私有快照 `9b99dad` 的 Windows run `41315105231` 已启动，包含恢复的停止断言及退出线程诊断，尚无结果。本机同时运行调度、草稿 runner 和跨日纵向测试 12 passed、129 warnings，pytest 返回时仅主线程；不证明 Windows 退出正常。
+
+# B328 恢复停止断言
+
+- 检查 B321 测试清理修改时发现其遗漏了原先对 `manager.stop` 成功的断言；现恢复断言，同时保留异常路径清理。本机跨日纵向测试 1 passed、81 warnings；私有快照 `9b99dad` 已同步。正在运行的 Windows 诊断任务早于此断言，不能证明它在 Windows 通过。
+
+# B327 Windows 测试进程退出异常
+
+- Windows run `41312377632` 的 pytest 报告 **52 passed、89 warnings**，包含跨日纵向测试；但 Python 进程在输出结果后未退出，测试步骤达到 15 分钟上限而失败，安装步骤被跳过。此前 60 秒线程转储捕获 WASI 暖机等待，但测试之后继续并全部通过，不能将该转储当作进程退出原因。
+- 本机同一纵向单测运行后只剩主线程，无法复现 Windows 退出异常。Windows workflow 补充 pytest 返回后的线程清单和循环退出栈；私有快照 `3c756c6` 的 `41314851988` 已启动，待取得 Windows 证据后修复。真实 Gateway 未验证，未发送订单。
+
+# B326 包含新手册的 Windows 构建
+
+- 使用私有快照 `e2ea3ca` 启动 Windows run `41313209200`，包含 B323 更新的手册及测试诊断；旧 run `41310723935`、`41312377632` 继续运行。本次仅启动构建，不能视为测试、安装或 Gateway 验收通过。
+
+# B325 Gateway 连接错误定位
+
+- 对本机 4002 只读调用 `get_account_snapshot`，连接阶段抛出 `IBKRConnectionError`，底层原因为 `TimeoutError`；未获取账户信息或发送订单。与端口监听同时存在，不能据此判断具体登录或 API 设置原因。
+
+# B324 构建手册同步
+
+- 已将 B323 的两份手册同步到私有构建分支快照 `e2ea3ca`，后续构建可包含更新；正在运行的 Windows 任务基于更早快照，不能作为新手册已打包的证据。未发送真实订单。
+- 逐字节比较工作区 115 个已改动或新增的非证据文档文件与该快照，差异为 0；该比较只证明构建输入一致，不证明构建或 Gateway 验收。
+
+# B323 手册安装证据更新
+
+- 根据 B320 的 Windows 原生安装证据，修正手册中过时的“计划内置、仍需 Windows 安装验收”表述，明确验证包已测干净安装、启动及同版本重装，真实 Gateway 和完整流程仍待验收。两份 HTML 手册逐字节一致，`git diff --check` 通过；此手册改动尚未进入正在运行的 Windows 构建。
+
+# B322 本机 Gateway 只读复测
+
+- 4002 有进程监听；使用当前 `discover_local_paper_gateway` 在独立进程中进行 35 秒上限只读复测，返回 `PaperGatewayDiscoveryError: PAPER connection could not be verified; check Gateway login and API settings`。未能核验账户，未发送订单；端口监听不代表可用 PAPER 会话。
+
+# B321 Windows 包校验及测试诊断
+
+- 已下载 B320 安装器 `/tmp/vibe-paper-windows-review-41309929324/unsigned-paper-windows-review/Vibe-Trading-Desktop-Unofficial-0.3.0-x64.exe`，本地 SHA-256 `4ea0eda1800b6a8980ea16d6e7553e1c306d3c717b7674246dade833bd8c77ee` 与校验文件一致。该包未签名，真实 Gateway 及 SDK 分发许可仍待核验。
+- `41310723935` 的 Windows 测试步骤长时间未结束，尚无失败日志；没有取消或认定失败。跨日纵向测试补充异常路径清理，Windows 测试步骤增加线程超时诊断和 15 分钟上限，本机该测试 1 passed、63 warnings，`git diff --check` 通过。私有快照 `acc1369` 的新 run `41312377632` 验证修订后的测试，与原任务并行。
+
+# B320 暂停恢复修正的 Windows 安装验证
+
+- 私有 Windows run `41309929324` 成功：打包运行测试 50 passed、21 warnings；干净安装、启动、同版本重装及配置保留通过。源码快照 `b78da5a` 包含跨日调度与 B314 暂停恢复修正；包含 B317 额外纵向测试的 `41310723935` 尚在运行。真实 Gateway 未验证，未发送真实订单。
+
+# B319 跨日版本 Windows 安装验证
+
+- 私有 Windows run `41309109416` 成功：打包运行测试 50 passed、21 warnings，干净安装、启动、同版本重装及配置保留通过。该快照早于 B314 暂停恢复限制和 B317 纵向测试，不代表最新版本验收；最新 run `41310723935` 仍在运行。未连接真实 Gateway 或发送订单。
+
+# B318 最新 Windows 验证启动
+
+- 私有快照 `a4eecb9dc51dc05c292a183cc1f34c190f5da4b9` 已推送，Windows run `41310723935` 已启动，包含跨日假券商纵向测试；构建及安装尚待结果。本机在 Windows 兼容性测试修改后重跑跨日纵向测试：1 passed、83 warnings；`git diff --check` 通过。没有发送真实订单。
+
+# B317 跨日策略到假券商回报
+
+- 将 B316 跨日托管组合扩展为第二日产生 BUY 2：实际日线调度、真实 Cerebro/事件日志、风险评估、托管派单、fake IBKR 成交回调和持仓更新在同一测试内贯通。单项 1 passed、63 warnings；使用假账户、行情和券商，不产生真实订单或证明真实 Gateway。
+
+# B316 跨日托管策略组合验证
+
+- 首次验证真实 Cerebro、`ManagedPythonPaperSession`、事件日志、管理器与日线调度器按两个交易日顺序处理 bar，确认游标推进且重复 tick 不重复投递；当时没有订单提案。B317 在同一测试上补充假订单及回报。
+
+# B315 调度器与管理器生命周期回归
+
+- 新增真实 `PaperExecutionManager` 加 fake runtime 的跨日调度回归：旧会话投递一次后停止、重建并激活新会话，旧调度器不会向新会话发送 bar。`test_paper_daily_scheduler.py` 6 passed、29 warnings；未连接真实 Gateway。该测试不替代完整 Windows 包验收。
+
+# B314 暂停草稿的恢复边界
+
+- 发现通用管理“启用”按钮可在草稿调度线程退出后直接重新激活会话，导致运行状态与实际日线调度不一致。草稿暂停后现拒绝该入口，并提示先停止会话、核对订单并准备新回测；撤单恢复仍保持暂停且可管理已有委托。后端回归 151 passed、168 warnings；前端 API/Execution 36 passed、构建通过。尚未在真实 Gateway 或最新 Windows 包验证。
+
+# B313 调度异常提示与 Windows 先前版本验收
+
+- Execution 页面显示日线调度失败和开仓窗口结束的明确提示；前端测试 27 passed、构建通过。窗口结束仍可管理已有订单。
+- Windows run `41307336930` 全部通过：打包运行测试 40 passed、21 warnings，干净安装、启动及同版本重装通过；安装器日志 SHA-256 `98bdd3f1ff659c6229ae0d656c03aa3bbfb9050199ff22ae59b6b269ccb22dd3`。该版本早于跨日调度，不代表新功能的 Windows 验收。
+
+# B312 跨交易日 PAPER 会话
+
+- 草稿窗口支持最多 90 个自然日，起止点须落在美股常规交易时段。草稿启动后后台检查上一交易日完整 bar，并在下一常规时段投递；重复、跳日、缺失行情或加载跨过窗口会暂停。到窗口结束暂停新增订单，仍可按原授权管理已持有委托；应用重启不会自动续跑策略。
+- 风险 provider 和派单前检查信号必须来自紧前交易日，并将新意图截止时间限制为当日收市与草稿截止时间的较早者。后台调度绑定具体 manager 会话实例，避免停止/替换后的旧线程向新会话投递。未连接真实 Gateway 或发送订单。
+- fake 调度、管理器、草稿启动、订单准备、风险、派单与 API 测试 150 passed、168 warnings；前端 Execution 26 passed。跨日后台组合尚未用真实 Gateway、完整 Windows 安装包或真实订单验收；运行中 Windows 包早于该修改。
+
+# B311 日线调度原语
+
+- 新增独立日线调度原语：仅在下一常规交易时段处理上一交易日新 bar；跳过的交易日、缺失/不匹配数据或加载期间窗口关闭会暂停，过期开仓窗口停止新增投递。管理器投递在锁内复核当前部署。fake 调度/管理器测试 31 passed、25 warnings。
+- 此原语尚未连接后台生命周期，现有草稿仍限定一个交易日窗口；不会自动执行后续日线。扩大窗口前仍需限制每笔意图的当日到期、校验派单时段并完成故障恢复。Windows 构建不含这次源码变更。
+
+# B310 后续行情投递管理接口
+
+- 为持续日线调度增加内部管理器投递原语：只接受同一账户、同一冻结版本且处于 RUNNING 的会话，投递失败时暂停；它不会启动或激活会话。管理器测试 27 passed。该原语尚未接入行情调度，当前仍只处理初始信号；运行中的 Windows 包不含该更改。
+
+# B309 Windows 通用草稿包安装与重装通过
+
+- Windows run `41305553022` 全部通过：打包 worker 与上传回测 40 passed、21 warnings，干净安装、启动及同版本重装通过。下载至 `/tmp/vibe-paper-windows-review-41305553022/Vibe-Trading-Desktop-Unofficial-0.3.0-x64.exe` 后本地 SHA-256 `044b8caf148fd4233964e2c6085b1bbb7c23f0f900a508b21584c3f37c9ebcb4` 与构建记录及校验文件一致。该版本早于页面标识和跨日调度等修改，不是最终交付包。测试不包含真实 Gateway 或券商订单。
+
+# B308 最新手册构建
+
+- 将 B307 手册同步到私有构建快照 `2c917ee`，核对 65 个工作区改动的应用及构建文件与快照逐字节一致；Windows run `41307336930` 已启动。先前 run 仍独立执行，其结果不自动代表新包通过。
+
+# B307 安装手册细化
+
+- 两份手册同步补充双击安装程序、选择安装位置和从桌面或开始菜单启动的步骤；不改变应用行为。`41306795336` 构建快照早于此手册修改，最终包需包含手册同步内容。
+
+# B306 PAPER 页面标识
+
+- Execution 页面顶部由过时的“离线”改为醒目的 PAPER 模拟盘及 LIVE 禁用标识；页面测试 26 passed、构建通过。之前的 `41305553022` 不含这次文案修改；最新构建 `41306795336` 已启动。
+
+# B305 Windows 中间版本安装证据
+
+- Windows run `41304355222` 构建及打包内 worker/上传回测测试通过，干净安装、启动、后台退出通过；它使用旧五分钟上限，同版本重装超时。该中间版本早于交易时段建议等修改；最新 `41305553022` 使用延长后的测试脚本，仍在构建，不能把中间版本结果当作最新包验收。
+
+# B304 最新构建源码一致性核对
+
+- 比较工作区改动的应用源码、前端、手册、打包脚本与私有快照：逐文件一致；Windows run `41305553022` 固定提交 `e2c6533` 后，私有分支只新增 managed-session 测试文件（`2071576`），没有变更应用文件。该检查证明构建输入与当前应用改动一致，不替代构建、安装或真实 Gateway 验收。
+
+# B303 管理会话和撤单回归
+
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_managed_python_paper_session.py agent/tests/execution/test_paper_draft_control_authorizer.py agent/tests/execution/test_ibkr_callback_pump.py agent/tests/execution/test_paper_execution_manager.py --disable-warnings --tb=short`：129 passed、311 warnings。覆盖 fake managed session、撤单授权、回调和恢复回归；不证明真实券商回报。
+
+# B302 多标的假券商完整回报链
+
+- 将真实 Cerebro/managed PAPER session 的 fake IBKR 派单与成交回报测试参数化为 AAPL 2 股和 MSFT 5 股，检查发送合约、数量、成交、持仓和现金；与通用草稿组合风险测试合跑 4 passed、37 warnings。该 managed-session 用例使用 fixture 授权和假券商，通用草稿风险用例另用假账户、报价及 recording sender；两者不证明真实 Gateway 或真实订单。
+
+# B301 Windows 旧包干净安装与同版本重装通过
+
+- Windows private retest `41304492115` 使用旧 review 包，校验哈希后完成干净安装、启动、同版本重装及测试状态文件保留；两次强杀主进程后后台退出且无关 Python 进程存活。日志两次启动检查间约七分钟，先前五分钟超时不足以判定安装失败；未证明跨版本升级或真实 Gateway。
+- 包含最新时段建议、错误提示、Gateway 超时和行情源修复的 private Windows build `41305553022` 已启动；旧包不含这些修改，仍不可交付。真实 PAPER Gateway 和持续行情调度尚未完成。
+
+# B300 建议交易时段
+
+- 新增只读交易日历建议接口和页面按钮：一键填入当前或下一个 XNYS 常规时段，收市不足五分钟时建议下一场；周末和提前收市按固定交易日历处理。建议只填写表单，不授权或下单，用户仍可修改。后端准备/路由 53 passed、28 warnings；前端 API/Execution 34 passed，构建通过。该变更未进入正在运行的 Windows 构建。
+
+# B299 参数校验原因展示
+
+- 前端 API 解析 FastAPI 字段校验错误时展示字段路径和原因，不回显错误中的原始 input；避免伙伴配置订单或风险上限失败时只看到 HTTP 422。API 与 Execution 测试共 34 passed，前端构建通过。该变更尚未进入运行中的 Windows 包。
+
+# B298 Windows 安装与重装复测
+
+- 旧包 Windows retest `41303651537` 通过干净安装、应用启动、后台健康与父进程退出清理；第二次安装超出五分钟上限，重装及状态保留未通过验收。测试现在清理仅属于临时安装路径的残留渲染进程，并将安装超时提高至 12 分钟；`41304492115` 正在复测，尚不能确定原超时根因。
+- 新包 Windows run `41303060252` 打包 worker、上传回测和独立回放测试通过，安装阶段仍在运行；包含后续修订的 `41304355222` 另在构建。
+
+# B297 Windows 原生回测通过及候选界面澄清
+
+- Windows private run `41303060252` 的安装器构建和打包内 WASI、上传回测及独立回放测试均通过；安装/重装仍在运行。该 run 不含其后 Gateway 超时、行情源和最新文案修复，不能当作最新交付包。
+- 通用草稿候选界面不再把旧 AAPL 固定单笔联调的不兼容状态显示成禁止通用 PAPER 部署；固定联调原因折叠并明确标识，仍由草稿证据核对决定通用资格。Execution 页面 26 passed、前端构建通过。
+
+# B296 增量行情尾部缺失检查
+
+- `IbkrPaperCompletedBarSource` 的增量读取此前只检查至供应商最后返回的交易日；如果最新完整交易日或全部新增交易日缺失，可能错误返回部分结果或空结果。现按当前时间及 XNYS 日历核对完整新增交易日集合，未来游标和缺失尾部均拒绝；盘中无新增完整日线仍返回空。相关 source、风险指标及草稿启动测试 20 passed、207 warnings。尚未接入持续行情调度或真实 Gateway 验证。
+- 两份同步手册补充 Gateway Socket API 及 PAPER 账户设置；当前运行中的 Windows 构建早于本次手册与行情源更改，不能当作最新源码交付。
+
+# B295 Gateway 请求超时与 Windows 安装探测
+
+- 本机检测到 Gateway PAPER 端口后进行了只读账户发现。连接期间 positions、account updates、executions 超时，随后账户摘要请求无界等待；已中断该只读探针，未下单、未完成账户核验。将 ib_async 同步请求超时设为连接配置的 timeout，避免账号摘要永久等待；复试返回连接未能核验，未证明真实账户连接成功。`agent/tests/test_ibkr_local.py` 与 discovery 测试 47 passed。
+- Windows 旧包安装复验 `41302977511` 校验哈希并启动了应用，后台日志显示健康检查和页面资源返回 200；测试脚本的单次健康探测失败，未进入重装。已将该探测改成有界重试并运行 `41303651537`，尚不能宣称安装验收通过。
+- 从 `41301797809` 下载旧 unsigned review 包至 `/tmp/vibe-paper-windows-review-41301797809/Vibe-Trading-Desktop-Unofficial-0.3.0-x64.exe`，SHA-256 `46b3152aa8bd2aaa53ca02e90133e87f6270806fb02bac8c55c093dc563477d8` 与校验文件一致；它不含后续 Windows 回放及 Gateway 修复，不能交付。线程回放超时终止测试加入后本机 9 passed。
+
+# B294 Windows 回放管道与桌面行情连接
+
+- Windows run `41301797809` 安装器构建通过，但打包后测试 29 passed、2 failed：独立 BackBroker 回放在 Windows 对匿名管道使用 selector，触发 WinError 10038，导致回测及上传 API 失败；安装步骤因此跳过。已加入 Windows 有界线程管道，保留输出上限和超时；本机回放子进程测试 8 passed，包含线程路径的真实子进程及超限测试。Windows 复验 `41303060252` 正在运行。
+- 桌面模式下两处 IBKR 行情入口改为只读发现唯一 PAPER Gateway/TWS 并自动使用对应端点；发现失败时不获取行情。页面不再要求桌面用户选 profile 或端口，浏览器开发模式保留旧选项。前端 Execution 测试 26 passed、构建通过；未接真实 Gateway。
+- 对上次产物启动独立 Windows 安装、启动和同版本重装测试 `41302977511`；该产物不含本次修复，仅用于诊断安装流程，不能交付。
+
+# B293 伙伴说明与 Windows 后续验证
+
+- 修正 Execution 上传提示和两份同步手册：通用草稿可选择受支持的标的及整股数量，固定 AAPL 单笔联调是独立入口；明确每份草稿绑定一个标的、当前只投递初始信号及真实 Gateway 尚待验证。Execution 页面测试 23 passed。
+- Windows 私有 run `41301797809` 的安装器构建已通过，打包后 worker 测试正在执行；安装、重装与产物核验尚待结果。该 run 的固定源码快照早于本次文案修订，不能将其安装器描述为包含最新手册。
+- 上传行情区域仍暴露 PAPER 端口选择，尚未达到伙伴完全无需选择内部端口的目标；持续日线调度和真实 Gateway 只读验收也未完成。
+
+# B292 Windows 私有构建与 SDK 跨平台核验
+
+- 已在本机找到官方 IBKR API 1050.02 并重新验证固定源码树摘要。为避免公开未提交改动，在用户账户创建私有构建仓库 `charlesyzk/vibe-paper-win-validation-9m2bfepe`，暂存精确源码快照及官方 SDK，仅用于 Windows review 构建。
+- 首次 Windows run `41299860805` 因 Windows 文件路径排序与 macOS 不同导致 SDK 树摘要不一致；已改为按相对路径字符串进行跨平台排序，本机原始源码仍匹配既有摘要，单测 8 passed。后续 run `41300135670` 已通过 Windows SDK 核验并进入安装器构建，结果尚未完成。
+- Windows 独立 WASI probe `41300791337` 因测试环境缺少 Pydantic 未能收集；补齐后 run `41301083218` 在 Windows Server 2025 上 4 passed、4 deselected，覆盖事件协议、标准库、宿主环境/文件/网络隔离和无限循环终止。该结果不证明 Windows 完整回测、安装或 Gateway 连接。
+- Windows run `41300135670` 成功构建 unsigned PAPER review 安装器，构建日志 SHA-256 为 `07499d70c90ae9cb59ad7a95088b1c544af559657947720cb8fdc942951488a9`，打包内 WASI 自检通过；安装启动检查失败，清理错误掩盖原始原因，且该 run 未上传产物。已改进诊断、加入完整 Windows WASI/backtest 测试和失败时保留 review 产物；新 run `41301797809` 正在执行。
+- 准备了私有 Windows 安装、启动、同版本重装与独立 WASI/backtest 测试流程；这些后续新增步骤尚未由当前 run 执行。额外 fake broker/管理回归 `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_paper_draft_runner.py agent/tests/execution/test_ibkr_managed_runtime.py agent/tests/execution/test_ibkr_callback_pump.py agent/tests/execution/test_paper_execution_manager.py --disable-warnings --tb=short`：111 passed、19 warnings；未发送真实订单。
+
+# B291 WASI 隔离策略 worker 与 Windows 打包接线
+
+- 增加固定摘要的 CPython 3.12 WASI + Wasmtime 29 worker：策略只在 WASI guest 执行，标准库目录只读，不继承宿主环境或文件系统，不提供网络 socket，并由 fuel、内存、输出和墙钟时间限制。上传回测和通用 PAPER 草稿可选择该 worker；桌面构建脚本下载并校验固定运行时、锁定 Windows wheel、打包许可及运行时自检。Docker worker 保留为源码环境选项。
+- 在 macOS 使用实际 WASI 二进制验证事件协议、允许的标准库、宿主文件/环境/socket 拒绝、无限循环超时、上传预览与 Backtrader 回测、PAPER 预热，以及 PAPER factory 选择。后端 67 passed、1739 warnings；前端 23 passed、构建通过；包装布局 fixture 通过。首次预热 fixture 路径错误已修正并复跑通过。尚未在 Windows 运行构建或自检、没有安装器和真实 Gateway 订单证据。
+
+# B290 后台准备草稿策略历史
+
+- 草稿部署的历史重放移到后台线程且不持有运行管理器锁；页面可继续读取状态并显示准备进度。安装前重新检查账户、部署、配置变更代数、运行生命周期、草稿和账本，期间发生变化则保留原部署并要求重试。
+- 后端 76 passed、11 warnings；前端 Execution 23 passed，构建通过。并发 fixture 验证阻塞预热期间状态可访问及账户、生命周期、配置变化拒绝安装；未连接 Gateway 或发送真实订单。Windows 无 Docker worker 和安装验收仍未完成。
+
+# B289 Windows 子进程管道兼容性
+
+- `PythonSandbox` 在 Windows 改用线程驱动匿名管道，保留总输出大小限制、超时与结束进程行为；原 POSIX selector 路径不变。新增跨平台子进程回环、大输入、双输出超限及子进程不读取输入时超时的测试，并将原 shell fixture 换为跨平台 Python 子进程。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_python_sandbox.py agent/tests/execution/test_event_worker.py agent/tests/execution/test_paper_strategy_warmup.py --disable-warnings --tb=short`：48 passed、18 warnings；线程路径在 macOS 以真实子进程测试，尚未在 Windows 运行。此修改仍依赖 Docker 隔离 worker，并未实现 Windows 免 Docker 方案或安装包。
+
+# B288 本机 PAPER Gateway 只读发现
+
+- Execution 页面自动检查并可手动重试本机 Gateway/TWS PAPER 端口，通过只读账户快照确认唯一 DU 模拟账户，再绑定本地配置和订单历史；不扫描 LIVE 端口、不启动策略或提交订单。连接检查是短暂只读探测，不表示交易会话持续在线；多个端点、多个账户、LIVE 或连接无法核验均拒绝。
+- fixture 验证发现、范围绑定和页面展示，未连接真实 Gateway；完整 Windows 安装、独立 worker 和真实 PAPER 账户连接仍未验收。
+
+# B287 桌面端自动注入本机 PAPER 身份
+
+- Electron 每次启动生成独立临时 PAPER 凭证，只向当前后端的 PAPER 路径注入；后端仅在本机 PAPER 路由接受，绑定当前操作系统用户配置。该身份可操作通用 PAPER 草稿，但不是经过验证的自然人身份，也不会获得原有人类身份专属流程的权限。部署审计使用稳定的本机账户名称；不需要伙伴手工复制 token。原有具名 token 和非 PAPER 内部密钥路径保留。
+- macOS 后端及 Electron 授权测试通过，包括真实 Electron webRequest smoke；未在 Windows 安装包、完整桌面与真实 Gateway 组合中验收。通用会话仍依赖 Docker worker 和手动 PAPER 账户配置。
+
+# B286 草稿部署自动绑定管理权限
+
+- 对已具名的操作员，草稿部署从原始部署记录派生该账户与操作员的管理权限；启动、激活不越过原开仓窗口，撤单、恢复和停止不因窗口结束失效。撤单仍逐单核验已持有的 PAPER 订单及券商绑定；恢复只对匹配部署的已知活动订单重连并保持暂停。部署记录新增可审计的操作员、账户和时间，不保存 token。现有独立管理 grant 仍可用。
+- 后端 81 passed、11 warnings，前端 Execution 22 passed，前端构建通过；详情见验收记录。仍需手动提供具名操作员 token，自动创建桌面身份、无 Docker worker、真实 Gateway 验证和 Windows 安装均未完成。
+
+# B285 重启后恢复匹配的草稿部署
+
+- 应用以已有本机只读 PAPER 配置启动时，离线重新打开该账户的现有订单历史；页面在有活动订单且部署尚未安装时提供恢复保存部署入口。恢复部署核对共享账本、草稿、策略及每笔活动订单的部署身份，拒绝未决发送和跨部署订单；恢复本身不连接 Gateway。之后仍需独立撤单授权与 PAUSED 重连对账。
+- fake 账本、新应用实例和页面测试验证匹配恢复、不同部署及 LIVE 配置拒绝；无真实 Gateway 或订单验证。仍依赖已配置的操作员 grant、原草稿及 Docker worker，Windows 免依赖安装尚未完成。
+
+# B284 暂停状态下重连以管理已知活动订单
+
+- 新增独立撤单恢复入口和页面按钮：当前部署仍在应用中且账本有匹配部署及策略的已知活动订单时，可使用有效 cancel grant 重新连接、对账并保持 PAUSED；未决发送、待发送订单、不同部署和缺失授权均阻止此入口。恢复不自动撤单或激活，后续撤单仍通过现有逐单校验及券商回调。
+- fake runtime、control grant 和页面测试通过，具体命令见验收记录。应用进程重启后的部署恢复、真实 Gateway 撤单回报、Windows 安装仍未验收。
+
+# B283 保存草稿部署的原始授权时间
+
+- 本地草稿 factory 持久化按账户、操作员和完整草稿绑定的部署请求时间；窗口结束后可用同一记录重建原风险 grant，仍保留原开仓截止时间，不能为过期的新草稿补造历史授权。重建本身不连接 Gateway 或启动会话；管理动作仍需要独立授权。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_deployment_receipt.py agent/tests/execution/test_local_paper_draft_factory.py agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_paper_order_preparation.py agent/tests/execution/test_risk.py agent/tests/test_paper_execution_routes.py --disable-warnings --tb=short`：63 passed、11 warnings。fixture 验证窗口结束后重建保留原时间且新订单仍被风控拒绝；未完成应用重启后恢复入口、独立撤单授权和真实 Gateway 验证。
+
+# B282 会话恢复时防止重复处理日线
+
+- 启动和失败恢复时，在已验证并影子重放的事件日志中恢复最后一根已提交 bar；重新投递同一 bar 不再创建第二个策略事件，同一时间但内容不同的 bar 会使会话报错。fake broker 恢复测试覆盖了已成交订单后重复初始 bar 和下一根 bar，未再次发送旧订单。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_managed_python_paper_session.py agent/tests/execution/test_python_paper_session.py agent/tests/execution/test_paper_draft_runner.py --disable-warnings --tb=short`：48 passed、273 warnings。未连接 Gateway 或发送真实订单；应用重启后自动恢复部署及持续行情调度仍未实现。
+
+# B281 通用草稿的初始信号入口
+
+- 新增草稿启动入口和页面按钮：核对保存的草稿、开仓窗口、信号可用时间及 Gateway 最新完整日线与回测信号的一致性，再交给管理器启动、激活及投递初始信号。投递不代表订单或券商确认；运行与部署互斥。后续行情自动调度、自动授权、Windows 免 Docker worker、重启恢复及安装验收仍未完成。
+- 后端针对性测试、前端 Execution 测试和前端构建使用 fixture，未连接 Gateway 或发送订单；具体结果见验收记录。
+
+# B280 信号日线一致性检查基础
+
+- 新增回测最终信号与 Gateway 最新完整日线的比较：检查交易日、合约、交易时段、币种及 OHLCV，拒绝过期、重复或不一致的行情；来源标签和可用时间允许不同。该检查目前尚未接入运行入口，不能据此认为通用策略已能启动或自动交易。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_strategy_warmup.py --disable-warnings --tb=short`：2 passed；仅使用假行情，未连接 Gateway 或发送订单。Windows 安装包及安装验收仍未完成。
+
+# B279 PAPER 会话的历史预热状态
+
+- 草稿部署前重新载入并验证所选回测的数据和冻结策略，按顺序重放最后信号日前的历史 bar，丢弃预热提案，只将 worker 状态作为 PAPER 会话初始 checkpoint；最终信号 bar 不在预热中执行。会话重建要求相同初始 checkpoint；首事件重试和 checkpoint 防篡改检查现在支持非空初始状态。通用行情投喂尚未接入，因此最终信号还不会自动推送。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_strategy_warmup.py agent/tests/execution/test_local_paper_draft_factory.py agent/tests/execution/test_event_journal.py agent/tests/execution/test_event_worker.py agent/tests/execution/test_python_upload_paper_composition_factory.py agent/tests/execution/test_paper_draft_composition.py agent/tests/test_paper_execution_routes.py --disable-warnings --tb=short`：105 passed、23 warnings。预热 replay 和本地 factory 测试使用 fixture/mock，未连接 Gateway 或发送订单；Docker worker、重启恢复及 Windows 安装仍待完成。
+
+# B278 本地草稿 factory 与部署按钮
+
+- 应用启动时注册本地草稿 factory，复用已配置的只读 PAPER Gateway、同一订单账本、实时报价/历史日线、风险事实和现有控制授权；页面增加部署保存草稿的按钮。部署只安装未启动的会话，不连接或发送订单。默认仍依赖既有 PAPER scope、具名操作员及 grant、Docker worker；应用重启不会自动恢复草稿部署，尚无通用行情驱动。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_local_paper_draft_factory.py agent/tests/test_paper_execution_routes.py agent/tests/test_state_migration_wiring.py agent/tests/execution/test_paper_draft_composition.py --disable-warnings --tb=short`：56 passed、20 warnings；前端 Execution 20 passed，构建通过。首次后端测试暴露路径字符串与 Path 类型差异，已修复并增加原账本复用覆盖。仅 fixture，未连接 Gateway 或发送订单；Windows 安装未完成。
+
+# B277 草稿部署的应用管理入口
+
+- 新增受认证的草稿部署路由：在运行时停止、现有订单已处理时，由应用注入的可信 factory 构造并安装通用 PAPER 会话，核对草稿的账户、版本、合约、订单和各项风险限制；部署本身不启动会话或发单。更换时要求保留原账本，防止丢失历史及未完成订单。草稿会话现绑定停止状态的账本历史读取。
+- `./.venv/bin/python -m pytest -q agent/tests/test_paper_execution_routes.py agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_paper_strategy_metrics.py agent/tests/execution/test_paper_execution_manager.py --disable-warnings --tb=short`：74 passed、15 warnings。fixture 验证成功安装及上限不符保留旧管理器；尚未提供应用默认 factory、自动授权、行情调度或免 Docker worker，故伙伴仍不能使用通用部署。没有连接 Gateway 或发送订单。
+
+# B276 Windows PAPER 安装包构建入口
+
+- 根据伙伴无需安装依赖的目标，采用 Windows NSIS 安装包方案。新增构建者一条命令串联官方 SDK 源码校验、前端构建、嵌入式后端、独立 IBKR runtime 和 unsigned review 安装器；伙伴最终只运行安装包并另行安装/登录 IB Gateway。该命令面向构建者，非伙伴端脚本。
+- macOS 上 `npm run test:paper-runtime-packaging`、`npm run test:packaging-preparation`、package.json 命令注册检查及 `git diff --check` 通过。本机无 Windows/PowerShell，新增脚本未实际执行，未产生安装器；无 Docker 的策略 worker、通用会话应用接入、自动身份与 Gateway 配置及 Windows 安装/升级验收仍未完成。未连接 Gateway 或发送订单。
+
+# B275 组合完整的账本策略风险事实
+
+- 草稿通用会话现在可在无需额外策略指标回调的情况下，根据本地成交、持久发送次数、费用、前收及当前报价生成持股和当日损益；价格缓冲和预计费用由宿主显式提供。只有在完整账户快照和报价可用时生成事实，本地预留由最终账本事务单独计入。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_strategy_metrics.py agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_dispatch_service.py agent/tests/test_paper_execution_routes.py --disable-warnings --tb=short`：复跑 103 passed、15 warnings；首次 102 passed、1 failed，既有假 broker 进程崩溃测试读到空日志，复跑通过，根因未确认。仍未将会话安装到应用，也未在真实 Gateway 验证前收、费用或成交；没有真实订单。
+
+# B274 从 PAPER 历史行情解析前收
+
+- `IbkrPaperCompletedBarSource.completed_bar` 按精确标的和日期返回已完成的 XNYS 日线，复用现有只读 PAPER 连接、合约核验和缺失日线检查；草稿会话可传入只读 PAPER 行情配置，构造基于对应合约的前收读取器。构造时不连接 Gateway；读取时仍依赖行情权限及 IBKR 历史复权语义。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_ibkr_completed_bar_source.py agent/tests/execution/test_paper_strategy_metrics.py agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_ibkr_paper_risk_facts.py --disable-warnings --tb=short`：42 passed、149 warnings；fake 历史行情验证合约及未完成日线拒绝。没有连接 Gateway 或发送订单，应用接入及 Windows 安装仍未完成。
+
+# B273 按成交和前收计算策略当日损益
+
+- 通用会话可注入可信前一交易日完整 bar 读取器：从账户及策略范围内的持久成交、当日 USD 费用和当前买价计算当日损益；隔夜持仓按前一交易日收盘价作为期初估值。缺费用、费用被更正、缺前收或快照早于成交时拒绝，不凭空补零。前收数据来源、复权及真实 IBKR 费用回报尚未验收，此 reader 尚未安装到应用。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_strategy_metrics.py agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_dispatch_service.py agent/tests/test_paper_execution_routes.py --disable-warnings --tb=short`：102 passed、15 warnings；fixture 覆盖当日成交亏损、缺费拒绝和隔夜持仓估值。没有 Gateway 或真实订单，Windows 安装仍未完成。
+
+# B272 草稿到假发送边界的离线组合
+
+- 使用由草稿构造的真实会话风险 provider，在 AAPL 1 股和 MSFT 2 股 fixture 上依次验证策略提案、资金不足拒绝、SQLite reservation、发送前风险复查及记录型 fake sender；数量被修改时拒绝。没有启动 SDK 或调用 Gateway，fake sender 只记录参数。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_paper_strategy_metrics.py agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_dispatch_service.py agent/tests/test_paper_execution_routes.py --disable-warnings --tb=short`：101 passed、11 warnings。应用尚未安装通用会话，真实策略损益事实与 Windows 打包仍未完成。
+
+# B271 从本地成交核算策略持股
+
+- 草稿会话的风险事实读取器从同 PAPER 账户、同版本及同标的的持久成交计算净持股，并要求成交早于账户快照；风险 provider 同时核对该持股不超过对账后的券商持仓。不同账户/策略不混算，异常或时间无法确认时拒绝。日损益和费用仍需外部可信事实；尚无真实券商验收。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_strategy_metrics.py agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_order_ledger.py --disable-warnings --tb=short`：57 passed、5 warnings；fixture 覆盖隔离、快照时间和持仓超出券商值。没有连接 Gateway 或发送订单；通用会话仍未接入应用和 Windows 安装。
+
+# B270 基于账本的当日提交次数
+
+- 草稿通用会话将宿主提供的策略风险事实与同账户、同策略版本的本地持久提交尝试数合并，按纽约本地日期计数；拒单和未知发送也计数，其他账户及版本隔离。账本或时间戳异常时拒绝风险评估。策略持仓、损益和费用仍由宿主真实事实源提供；该计算尚未证明跨独立 ledger 或并发发送的全局原子限额。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_strategy_metrics.py agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_order_ledger.py --disable-warnings --tb=short`：55 passed、5 warnings。仅离线 fixture；通用会话尚未安装到应用，也未连接 Gateway 或发送订单。
+
+# B269 草稿连接通用 PAPER 会话构造器
+
+- 新增从已保存草稿构造通用 Python-upload PAPER composition 的入口：重验策略/报告/合约，绑定订单、账户、时段和风险授权，建立对应行情 feed 和两阶段风险 provider。宿主仍须显式注入对账、实时报价、策略损益、控制授权等真实服务；该入口未安装到应用启动，也不会启动连接或派单。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_draft_composition.py agent/tests/execution/test_paper_order_preparation.py agent/tests/execution/test_python_upload_paper_composition_factory.py agent/tests/test_paper_execution_routes.py --disable-warnings --tb=short`：56 passed、11 warnings。AAPL 1 股和 MSFT 2 股 fixture 验证构造及账户隔离；未连接 Gateway 或发送订单。缺少生产风险事实与管理编排，Windows 安装亦未完成。
+
+# B268 PAPER 订单草稿保存和恢复
+
+- 账户隔离的草稿可保存和恢复冻结版本、运行编号、订单、窗口及上限；读取时重新验证报告、数据摘要和合约 ID。页面提供保存/恢复入口，明确草稿未部署、不能发单；同一账户只保留最新一份。草稿不产生风险授权，也不更改当前运行中的组合。
+- 后端 `./.venv/bin/python -m pytest -q agent/tests/test_paper_execution_routes.py agent/tests/execution/test_paper_order_preparation.py agent/tests/execution/test_paper_strategy_candidates.py agent/tests/execution/test_paper_strategy_deployment.py --disable-warnings --tb=short`：60 passed、11 warnings；前端 Execution 20 passed，`npm run build` 通过。fixture 覆盖账户隔离、报告损坏、页面保存/恢复；没有连接 Gateway 或发送订单。通用草稿到实际部署、可信实时风险事实和 Windows 安装仍未完成。
+
+# B267 将已验证订单设置转换为通用风险授权
+
+- 已验证的订单及回测证据现在可与窗口、金额和笔数设置构造账户及策略版本绑定的 PAPER `RiskGrant`，固定使用现金检查；构造本身不会保存授权、启动会话或发送订单。fixture 用 AAPL 1 股和 MSFT 5 股分别将所得授权及同一订单策略传入提案和发送前事实 provider，验证两处使用一致设置。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_order_preparation.py agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_risk.py agent/tests/test_paper_execution_routes.py --disable-warnings --tb=short`：83 passed、11 warnings。仍未把该授权接入可保存的 partner 部署或生产 composition；没有连接 Gateway 或发送订单。
+
+# B266 订单时段和风险上限只读预览
+
+- 候选页可填写带时区的开仓窗口及单笔、总持仓、策略预算、日亏损和每日笔数上限；受认证预览 API 校验单个 XNYS 常规交易时段（包括提前收市）和限价单静态金额，不检查市价单金额或实时账户风险。输入仅预览，不保存、授权或启用；保留每项数值的合理范围和清晰失败原因。
+- 后端 `./.venv/bin/python -m pytest -q agent/tests/test_paper_execution_routes.py agent/tests/execution/test_paper_order_preparation.py agent/tests/execution/test_ibkr_paper_risk_facts.py --disable-warnings --tb=short`：70 passed、11 warnings；前端 `npm run test:run -- src/pages/__tests__/Execution.test.tsx`：20 passed，`npm run build` 通过。无真实订单；通用部署与 Windows 安装尚未完成。
+
+# B265 支持提前配置风险授权窗口
+
+- 风险授权允许在交易窗口开始前签发，但必须早于窗口结束；风险评估与通用 PAPER 提案 provider 同时拒绝签发前及窗口外的使用。测试覆盖提前签发、开盘前拒绝、窗口开始放行、结束边界拒绝及未来签发时间拒绝。撤单授权与新订单窗口独立，未改撤单流程。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_contracts.py agent/tests/execution/test_risk.py agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_outbox_dispatch.py agent/tests/execution/test_dispatch_service.py agent/tests/execution/test_paper_integration_test_risk_facts.py --disable-warnings --tb=short`：112 passed、1 warning。首次命令误写测试文件名，未运行测试；更正后通过。仅 fixture，尚无 partner 窗口配置 UI 或通用部署，未连接 Gateway 或发送订单。
+
+# B264 运行时固定所选回测报告摘要
+
+- 修复 B263 后的缺口：部署配置持久保存所选报告 SHA-256，候选目录和固定 PAPER composition 重读报告时均要求该摘要；找不到所选报告时拒绝，不自动回退到同版本较新报告。无摘要的旧配置保持原有兼容行为，重新选择后写入摘要。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_paper_backtest_attestation.py agent/tests/execution/test_paper_strategy_deployment.py agent/tests/execution/test_paper_strategy_candidates.py agent/tests/execution/test_paper_integration_test_config.py agent/tests/execution/test_paper_integration_test_runner.py agent/tests/test_paper_execution_routes.py --disable-warnings --tb=short`：75 passed、6 warnings；第一次 74 passed、1 failed 是测试断言预期错误，已修正。fixture 覆盖较新报告存在时选中旧报告与缺失时拒绝；未连接 Gateway 或发送订单。通用自选部署和 Windows 安装仍未完成。
+
+# B263 回测候选与选择绑定运行编号
+
+- 候选列表保留同一冻结版本的各次已验证回测和当前部署记录，界面显示运行编号；选择请求带上具体运行编号，服务端只选择该记录，复制前后检查报告摘要，防止选中另一份或在选择期间替换报告。旧请求未指定运行编号时仍保留原兼容行为；固定 AAPL 部署限制没有改变。
+- 后端候选、部署、预览及路由测试 57 passed、2 warnings；前端完整 Execution 测试首次 19 passed、1 failed（无关 RSI 测试超时，墙钟约 554 秒），复跑 20 passed；选择相关定向测试 1 passed、19 skipped；`npm run build` 通过。未连接 Gateway 或发送订单，自选生产部署与 Windows 安装仍未完成。
+
+# B262 PAPER Windows review 包运行时布局检查
+
+- 新增 `installer:win:paper-review`，打包前及 electron-builder 的解包输出中检查独立 Python、IBKR SDK、worker、protobuf 和许可证文件；缺失或空文件使命令失败。Windows CI 增加布局检查 fixture。该检查不验证 NSIS 安装内容、SDK 许可、应用启动或交易功能，普通 review 包仍维持原行为。
+- `cd desktop/electron && npm run test:paper-runtime-packaging && npm run test:packaging-preparation`：均通过；`git diff --check` 通过。本机 macOS 没有 PowerShell/Wine，未构建或安装 Windows 包。通用自选部署、无 Docker worker、Windows 原生构建和干净安装/升级仍未完成；未连接 Gateway 或发送订单。
+
+# B261 通用 PAPER 风控现金上限
+
+- 通用 IBKR PAPER 风险事实 provider 将账户 `TotalCashValue` 与 `AvailableFunds` 的较小值作为现金上限，避免把可能包含保证金购买力的 AvailableFunds 全部当成现金；负现金余额拒绝评估。非美元账户仍须使用固定合约、新鲜双边 FX 报价换算，换算不证明券商实际会自动兑换或接受订单。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_risk.py agent/tests/execution/test_outbox_dispatch.py --disable-warnings --tb=short`：57 passed、1 warning。覆盖两种上限、负现金和 HKD 换算；fixture 不代表真实账户验收。通用 provider 尚未接入生产自选部署；未连接 Gateway 或发送订单。
+
+# B260 通用风险事实拒绝未归属的账户未结订单
+
+- 通用 IBKR PAPER 风险事实 provider 先前读取账户未结订单却把外部账户预留设为零。现在只要新鲜对账快照存在未结订单，就拒绝新订单风险评估，直到能可靠归属及估值这些预留；同时要求快照摘要具备 SHA-256 格式。此限制不影响撤单路径。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_ibkr_paper_risk_facts.py agent/tests/execution/test_paper_order_preparation.py agent/tests/execution/test_outbox_dispatch.py --disable-warnings --tb=short`：44 passed、1 warning。均为 fixture；通用 provider 尚未接入生产自选部署，仍缺可信策略损益及订单预留归属。未连接 Gateway 或发送订单。
+
+# B259 停止时等待持久回报交付
+
+- 停止流程在既有超时内同时等待持久 callback 和 inbox 清空；超时仍保持租约并拒绝安全停止。新增测试模拟 inbox 延迟交付，确认交付前保留租约、交付后可停止。这是 B258 偶发停止失败的一种可能解释，尚未证明是其根因。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_ibkr_managed_runtime.py agent/tests/execution/test_managed_python_paper_session.py agent/tests/execution/test_ibkr_callback_pump.py agent/tests/execution/test_order_ledger.py --disable-warnings --tb=short`：141 passed、253 warnings。未连接 Gateway 或发送订单；自选订单生产部署及 Windows 安装仍未完成。
+
+# B258 撤单等待期间的部分成交
+
+- 修复待撤单期间部分成交使订单状态回退为 PARTIALLY_FILLED：现在保留 CANCEL_PENDING，同时累计真实成交和剩余数量；完全成交仍变 FILLED，后续撤单确认或拒绝分别更新状态。fake callback 测试覆盖确认，以及直接 ledger fixture 覆盖拒绝；真实 IBKR 拒绝映射仍未证明。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_ibkr_callback_pump.py agent/tests/execution/test_order_ledger.py agent/tests/execution/test_ibkr_managed_runtime.py agent/tests/execution/test_managed_python_paper_session.py --disable-warnings --tb=short` 首次 139 passed；新增拒绝 fixture 后一次运行出现 runtime.stop 未及时完成，残留 callback 线程导致后续 14 项连锁失败，pytest 退出时需中断；全组重新运行 140 passed、247 warnings。未连接 Gateway 或发送订单；通用部署和 Windows 安装仍未完成。
+
+# B257 成交先于撤单错误的竞态
+
+- 10148 回调现在也处理本地完整成交先到的顺序：保留真实 fill，同时将尚未终结的撤单尝试标为 UNKNOWN；没有本地尝试或尝试已终结时不改写它，仍暂停要求对账。
+- callback pump、账本和 managed runtime 测试 102 passed；仅 fake 回报，无 Gateway 订单。其他撤单拒绝回调、断线恢复、自选生产部署及 Windows 安装仍未完成。
+
+# B256 IBKR 撤单已成交错误保持未知并对账
+
+- 对 IBKR 文档中的 10148（尝试撤销已成交订单）错误，只有订单号解析到本账户持久绑定、且本地撤单处于 pending 时才把撤单结果标为 UNKNOWN；随后暂停并要求对账，不凭错误消息虚构成交或撤单确认。错误仍会保留在 callback spool 供恢复处理。
+- 官方说明：https://interactivebrokers.github.io/tws-api/message_codes.html 。`./.venv/bin/python -m pytest -q agent/tests/execution/test_ibkr_callback_pump.py agent/tests/execution/test_order_ledger.py agent/tests/execution/test_ibkr_managed_runtime.py --disable-warnings --tb=short`：101 passed。使用 fixture，没有真实订单；其他撤单拒绝码及重连恢复仍需验证。
+
+# B255 撤单拒绝回调差距审计
+
+- 核对 SDK error callback 到 host pump：仅订单拒绝码 201 有专用映射，未分类错误会暂停并要求对账；账本虽支持 `CANCEL_REJECTED`，当前没有证明真实 IBKR 撤单拒绝回调能到达该状态。保留此未完成项，不将未知错误推断为拒绝。
+- `./.venv/bin/python -m pytest -q agent/tests/execution/test_ibkr_callback_pump.py agent/tests/execution/test_order_ledger.py --disable-warnings --tb=short`：86 passed；仅 fixture，没有连接 Gateway 或发送订单。自选交易及 Windows 安装仍未完成。
+
+# B254 订单预览与运行时日程约束一致
+
+- 冻结订单策略构造现在同时核对完整日线、常规时段、交易日历、纽约时区、已完成 bar 决策、下一常规时段派单及缺口/错过时段的暂停规则，与现有 Python PAPER session builder 的策略限制一致；不兼容版本在只读预览阶段拒绝。
+- 订单准备、通用风险和 PAPER 路由测试 63 passed、2 warnings；没有 Gateway 连接或真实订单。该修复不提供通用生产部署或 Windows 安装包。
+
+# B253 候选页面的订单证据核对
+
+- Execution 候选页面可选择 BUY/SELL，以冻结的标的、股数、订单类型和限价调用只读证据预览；返回合约信息，并明确显示未检查实时风险、当前不可提交。候选 API 提供冻结限价；请求失败显示服务端原因。该功能不创建部署、不发单。
+- 候选/准备/路由后端 51 passed、2 warnings；Execution UI 20 passed，前端 production build 通过。MSFT 5 股页面测试使用 fixture；生产自选订单部署和 Windows 安装仍未完成。
+
+# B252 受认证的 PAPER 订单证据预览接口
+
+- 新增 `POST /api/execution/paper/order-preview`，从应用受信 IBKR PAPER scope 获取账户，验证指定冻结版本、回测及精确订单，返回合约和报告摘要。请求禁止传入账户等额外字段；返回明确标注未检查实时风控、不可提交、未下单。此接口只读，不创建部署或连接 Gateway。
+- 路由、订单准备、候选及风险测试 68 passed、2 warnings，覆盖账户不能由请求覆盖、数量不符和缺少受信 scope；无真实订单。伙伴 UI、生产通用部署、可信实时风险事实和 Windows 安装仍未完成。
+
+# B251 从回测证据准备多标的订单
+
+- 新增只读准备函数：从指定成功 run 加载完整性校验通过的 Backtrader 报告、受信版本存储及服务器签发的 IBKR PAPER 行情证明，核对版本、标的、重放、合约 conId/证券类型/币种和 SMART/primary exchange，再构造冻结订单策略与合约映射；不连接 Gateway、不发单。报告读取期间发生变化时拒绝。
+- AAPL 1 股、MSFT 5 股 fixture 测试覆盖成功准备、数量和合约 ID 不匹配；准备、候选和风险测试 28 passed、1 warning。准备函数尚未接生产部署/界面，也未提供实时风险事实或 Windows 安装；自选交易仍不可用。
+
+# B250 订单策略与冻结版本一致性
+
+- 新增从冻结 Python 策略版本构造 PAPER 订单策略的校验：标的、显式整数股数、订单类型、DAY/RTH、限价及版本中明确指定的方向必须匹配。AAPL 1 股和 MSFT 5 股 fixture 测试覆盖正确绑定及参数不匹配。
+- 风控、outbox、composition 和候选定向测试 54 passed、1 warning。该构造器尚未接入 partner 生产部署和数据证明，尚不能自选交易；没有真实 broker 订单。
+
+# B249 通用提案与发送前订单策略绑定
+
+- 新增不可变 `PaperOrderPolicy`，将一个 IBKR DU PAPER 账户、冻结版本和精确标的、方向、数量、DAY 订单类型/限价绑定到现有通用风控 grant；构造时拒绝超出单笔额度或与 grant 不符的策略。通用 provider 的提案和发送前事实读取都要求相同策略，缺失或不匹配时关闭。
+- AAPL 1 股与 MSFT 5 股假行情测试覆盖允许的提案、错方向/数量/价格、错账户、超额策略及发送前偏离；通用风控、outbox、risk 和 composition 测试 55 passed、1 warning。该策略尚未接入 partner 配置和生产 composition，不能认为自选交易可用；没有真实 broker 订单。
+
+# B248 Windows PAPER 后端依赖锁
+
+- 新增与 Windows base lock 共同求解的 PAPER 依赖锁，包含 Backtrader 1.9.78.123、exchange-calendars 4.13.2、IBKR 只读 connector 及其新增依赖；backend 组装按哈希安装并在内嵌 Python 检查版本。`ib-async` 2.1.0 要求 `tzdata<2026`，与 base 的 2026.3 冲突，因此 Windows 锁使用项目允许的 2.0.1；独立 SDK 仍使用单独 protobuf 5 环境。
+- Windows x64/Python 3.12 的 8 个新增 wheel 哈希验证下载成功；本机临时使用 ib-async 2.0.1 跑 local connector/风险测试 54 passed。该测试不代表 Windows 原生导入或 Gateway 联通；无 Windows runner，SDK 组装、无 Docker worker、通用部署与安装验收仍未完成。没有真实订单。
+
+# B247 Windows 独立 IBKR runtime 组装脚本
+
+- 新增 `runtime:ibkr:win`：在已准备的 Windows backend 内建立独立 CPython，校验官方 SDK 1050.02 源码树锁、安装哈希固定的 protobuf 5.29.5 等 Windows wheels、复制 SDK/隔离 worker 和构建者提供的许可文件，并离线检查导入；拒绝覆盖已有目标。没有捆绑 IB Gateway。
+- 本机 `python3 -m pip download --require-hashes --only-binary=:all: --platform win_amd64 --python-version 3.12 --implementation cp --abi cp312 -r desktop/electron/requirements-ibkr-windows-lock.txt -d /private/tmp/vibe-ibkr-windows-wheels` 成功校验三项 wheel。无 Windows/PowerShell，未执行组装脚本或检查实际 SDK 导入；分发许可、backend 可选依赖、无 Docker worker、通用交易和安装升级测试仍未完成。无真实订单。
+- 既有官方 SDK 源码校验与 runtime 路径测试 11 passed、1 warning；Electron 下载准备测试通过。这些测试未执行新 PowerShell 组装脚本。
+
+# B246 独立 IBKR 解释器路径解析
+
+- PAPER composition 现优先解析 backend 安装目录中的独立 `ibkr-runtime` 解释器；开发环境按 Windows `.venv/Scripts/python.exe` 或 Unix `.venv/bin/python` 解析。已存在但不完整的打包目录不会静默回退到开发环境；runtime factory 继续要求解释器与工作目录存在。
+- 路径、runner、隔离进程与 factory 测试 29 passed、5 warnings、19 subtests。当前 Windows 构建尚未组装该 runtime，Windows 依赖锁尚无 Backtrader/IBKR connector；无 Windows 原生构建或安装验证，也没有真实订单。
+
+# B245 上传回测锁的 Windows 导入兼容
+
+- Python 上传回测服务不再直接导入 Windows 不存在的 `fcntl`，而使用 B239 的本地跨平台锁；并发运行/恢复同一回测仍被拒绝，释放后可重试。Windows CI 增加该锁测试步骤，尚未实际运行 Windows CI。
+- 本机执行上传服务、Backtrader、锁及 API 回归 48 passed、1899 warnings。未运行 Gateway 或券商订单；独立 SDK 打包、无 Docker 隔离运行、多标的实际部署和 Windows 安装仍未完成。
+
+# B244 STOPPING 后可重试完成停止
+
+- 会话第一次停止时若底层未静默，runtime 保持 STOPPING 和 owner lease；此前第二次停止错误地再次调用仅支持 RUNNING/PAUSED 的 pause。现在仅在本会话已启动停止且 lease 仍持有时，从 STOPPING 继续执行安全关闭；不改变派单闸门。
+- 修改前会话回归复现 4 个 `cannot pause scope from STOPPING` 失败；修改后 managed session/runtime/manager/API 组 114 passed、250 warnings。测试使用假 broker，不下单；断线后恢复、通用部署与 Windows 安装仍未完成。
+- Execution 页接入现有受授权 stop API，在 lease 持有的 READY/STOPPING 状态分别提供停止与重试，并区分等待状态；UI 测试 19 passed、前端 production build 通过。停止不自动撤销活动委托。
+
+# B243 停止等待期间的撤单
+
+- 修复 manager/UI 支持 STOPPING 撤单而底层 runtime 拒绝的断点：在 STOPPING 状态，只有持有账户 lease、SDK 未关闭且 callback consumer 健康时才能对持久绑定的 PAPER 活动订单请求撤单；发送和回调依旧经过现有账本及独立 operator 授权。假券商测试覆盖 STOPPING、撤单 pending、券商取消回调和安全停止。
+- 使用真实 grant store 的受控时钟测试：开仓 activate grant 到期后，仍有效的 cancel grant 可以撤单，但不能激活；其他账户及 cancel grant 到期均拒绝。该测试不自动延长或签发 grant，也不证明停止后重连恢复。
+- managed runtime/manager/session/API 合并测试 114 passed、270 warnings；manager/control grants/runtime 测试 45 passed。无真实券商订单；自选标的部署及 Windows 安装仍未完成。
+
+# B242 候选列表展示冻结股数
+
+- 候选 API 返回冻结版本中有效的显式整数股数，Execution 页显示该股数；非显式仓位或无有效数量时不显示。现有兼容性检查和固定 PAPER 授权没有改变，自选标的和数量仍不能用于生产 PAPER 部署。
+- 候选/部署后端测试 13 passed、1 warning；Execution 页面 18 passed；前端 production build 通过。未连接 Gateway，未发送订单。
+
+# B241 通用 PAPER 提案风控输入
+
+- `IbkrPaperRiskFactsProvider.proposal_inputs` 将冻结策略提案的账户、PAPER 环境、版本和 deployment 身份绑定到现有通用账户快照、合约和实时双边报价提供器，并在采集前后检查 grant 有效期及撤销；既有提案授权器执行订单额度、现金和持仓风控。现有固定联调 composition 未切换到该接口。
+- 使用假账户/行情经真实提案授权器测试 AAPL 1 股和 MSFT 5 股、超出订单额度、错账户及过期授权；`test_ibkr_paper_risk_facts.py`、`test_outbox_dispatch.py`、`test_risk.py` 共 44 passed。未连接 Gateway、未发送订单。通用配置、风险事实生产来源和 partner UI 仍未接入，不能声称支持其他标的的实际部署。
+
+# B240 PAPER 导入证明绑定券商合约
+
+- 候选校验现在同时比对报告内的 qualified contract 与服务器签发的 PAPER 导入证明中的代码和 conId，并要求 USD 股票；代码、conId、证券类型或币种不匹配时拒绝候选。该检查为后续多标的部署提供身份绑定，并未启用通用交易。
+- 候选、部署和 IBKR/PAPER API 定向测试 15 passed、31 deselected、542 warnings；使用 fixture，没有连接 Gateway 或发送订单。生产 PAPER 仍固定 AAPL/1 股；自选标的和数量、风控配置、Windows 安装仍未完成。
+
+# B239 Windows 宿主锁与多标的回测证明基础
+
+- 宿主账户 owner lease 和订单号分配器不再无条件导入 `fcntl`；Windows 使用非阻塞字节范围锁，POSIX 保持 flock。添加跨进程互斥与释放测试、Windows API 适配模拟测试及 Windows CI 测试步骤；本次只在 macOS 执行，Windows 原生行为和继承 ACL 尚未实测。
+- 回测 attestation 和部署报告解析不再硬编码 AAPL，而绑定冻结版本的 instrument；MSFT、5 股版本的报告验证以及错标的拒绝通过测试。现行 candidate、配置、合约映射及风控仍固定 AAPL/1 股，**尚不能部署或提交其他标的/数量**。
+- `pytest` 宿主锁/manager 组合 53 passed；attestation/candidate/deployment/runner 组合 15 passed、5 warnings。没有连接 Gateway 或发送订单；真实 PAPER 回报留待合作伙伴验证。
+
+# B238 撤单结果持久展示与 Windows 交付差距审计
+
+- PAPER 活动历史返回账户范围内的持久撤单状态；页面区分请求中、结果未知、券商确认和券商拒绝，已有撤单尝试时不再展示无法成功的重复撤单按钮。该修改不改变授权或发送逻辑。假券商测试验证请求中、未知和确认；真实券商订单未发送。
+- 当前 Windows 构建脚本未打包独立 `ibkr-runtime`，固定 composition 仍指向 Unix `.venv/bin/python`；本机为 macOS，未发现 Windows/Powershell/Wine 环境或已组装 Windows backend。通用订单、免 token/Docker 安装及 Windows 干净安装/升级验收仍未完成，不可视为可交付安装包。
+- 后端 `test_ibkr_managed_runtime.py` 和 `test_order_ledger.py` 38 passed；Execution UI 18 passed；前端 production build 通过。真实 PAPER ACK/fill/持仓对账明确留给合作伙伴后续验证。
+
 # B237 Electron 实际网络请求凭证路由验证（2026-11-01）
 
 - 新增 `desktop/electron/scripts/smoke-operator-auth.cjs`：在隐藏的真实 Electron BrowserWindow 和临时本机 HTTP 服务之间发起 fetch，经过 Electron `webRequest.onBeforeSendHeaders` 和与主进程相同的授权头处理函数；PAPER 路径到达服务时保留具名 operator token，settings 路径使用内部 key。`npm run smoke:operator-auth` 在本机 Electron 43.1.1 通过；仅使用测试凭证和临时服务，不连接 Gateway、不下单。

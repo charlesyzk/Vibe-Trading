@@ -85,10 +85,13 @@ def verify_paper_backtest_attestation(
     report_dir: str | Path,
     *,
     version: StrategyVersionRecord,
+    report_sha256: str | None = None,
 ) -> PaperBacktestAttestation:
-    """Load the newest exact-version report and verify its local digest and provenance."""
+    """Verify a version's report, optionally requiring its exact content digest."""
     if not isinstance(version, StrategyVersionRecord) or not is_sha256(version.version_id):
         raise PaperBacktestAttestationError("a verified frozen strategy version is required")
+    if report_sha256 is not None and (not isinstance(report_sha256, str) or not is_sha256(report_sha256)):
+        raise PaperBacktestAttestationError("report digest must be a lowercase SHA-256 hash")
     directory = Path(report_dir).expanduser()
     try:
         directory_info = directory.lstat()
@@ -120,6 +123,8 @@ def verify_paper_backtest_attestation(
             integrity = json.loads(sidecar.read_text(encoding="utf-8"))
             report = json.loads(report_bytes.decode("utf-8"))
             digest = hashlib.sha256(report_bytes).hexdigest()
+            if report_sha256 is not None and digest != report_sha256:
+                continue
             if (not isinstance(integrity, dict)
                     or set(integrity) != {"schema_version", "artifact_filename", "size_bytes", "sha256", "strategy_version_id"}
                     or integrity.get("schema_version") != SCHEMA_VERSION
@@ -164,7 +169,8 @@ def _validate_report(
         and provenance.get("strategy_version_hash") == version_id
         and report.get("source_kind") == "python_upload"
         and report.get("engine", "").startswith("Backtrader ")
-        and report.get("instrument_id") == "AAPL"
+        and isinstance(report.get("instrument_id"), str)
+        and bool(report["instrument_id"].strip())
         and is_sha256(manifest_hash)
         and isinstance(manifest, dict)
         and isinstance(integrity, dict)

@@ -96,3 +96,29 @@ def test_attestation_rejects_unverified_execution_integrity(tmp_path):
 
     with pytest.raises(PaperBacktestAttestationError):
         write_paper_backtest_attestation(path, version_id=version.version_id)
+
+
+def test_attestation_supports_other_instruments_but_rejects_version_mismatch(tmp_path):
+    spec, source = build_paper_integration_test_spec(date(2026, 10, 30))
+    data = spec.model_dump(mode="json")
+    data["instrument_ids"] = ["MSFT"]
+    data["parameters"]["quantity"] = 5
+    version = StrategyVersionStore(tmp_path / "versions").create_version(
+        type(spec).model_validate(data), upload_source=source,
+        engine_version=f"backtrader/{backtrader.__version__}",
+        compiler_version=PYTHON_WORKER_COMPILER_VERSION,
+    )
+    report_dir = tmp_path / "backtests"
+    report_dir.mkdir()
+    path = report_dir / f"20261031T120000Z-{version.version_id}.json"
+    report = _report(version)
+    report["instrument_id"] = "MSFT"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    write_paper_backtest_attestation(path, version_id=version.version_id)
+    assert verify_paper_backtest_attestation(report_dir, version=version).version_id == version.version_id
+
+    report["instrument_id"] = "AAPL"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    write_paper_backtest_attestation(path, version_id=version.version_id)
+    with pytest.raises(PaperBacktestAttestationError):
+        verify_paper_backtest_attestation(report_dir, version=version)

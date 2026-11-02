@@ -30,6 +30,8 @@ class AuthMethod(str, Enum):
     FEDERATED_IDENTITY = "federated_identity"
     #: A unique locally issued operator token bound to one named operator.
     LOCAL_OPERATOR_TOKEN = "local_operator_token"
+    #: An application-issued credential bound to a local OS user profile.
+    LOCAL_DESKTOP_PROFILE = "local_desktop_profile"
 
 
 #: Auth methods that can attribute an action to a named human. Shared-key and
@@ -52,9 +54,9 @@ class Principal:
     dev-trust, a locally issued unique operator token, or a federated identity.
     The first two prove access without naming a person. :attr:`attributable`
     is therefore False for those methods. Any control that
-    needs a named human -- four-eyes approval, a MiFID II recipient log, SEC
-    17a-4 attribution -- must check ``attributable`` and refuse rather than
-    quote ``subject`` as if it were a person.
+    needs a named human must check ``attributable``. A desktop profile
+    identifies an OS account, not a verified individual, and is only eligible
+    for the explicitly scoped PAPER operator workflow.
 
     Attributes:
         subject: Identifier for the actor. Under a shared secret this is a
@@ -94,6 +96,11 @@ class Principal:
             "display_name": self.display_name,
             "attributable": self.attributable,
         }
+
+    @property
+    def paper_operator(self) -> bool:
+        """Whether this identity can operate the local PAPER-only workflow."""
+        return self.attributable or self.auth_method is AuthMethod.LOCAL_DESKTOP_PROFILE
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Principal:

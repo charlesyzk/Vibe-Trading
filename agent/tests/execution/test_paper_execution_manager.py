@@ -329,6 +329,45 @@ def test_activation_requires_attributable_actor_and_explicit_control_grant(tmp_p
     assert runtime.activation_calls == 1
 
 
+def test_scheduled_bar_requires_matching_running_session_and_pauses_on_rejection(tmp_path):
+    scope = _scope()
+    runtime = FakePaperRuntime(scope, tmp_path / "scheduled.sqlite")
+    runtime.version_id = "a" * 64
+    bars = []
+    runtime.push_completed_bar = bars.append
+    manager = PaperExecutionManager(
+        runtime_factory=lambda _: runtime,
+        control_authorizer=lambda _principal, _scope, action: action in {"activate", "stop"},
+        startup_readiness=_ready(),
+    )
+    manager.start(scope)
+    with pytest.raises(PaperRuntimeConflict, match="running"):
+        manager.push_scheduled_completed_bar(scope, expected_strategy_version_id=runtime.version_id, bar="first")
+    manager.activate(scope, _principal())
+    token = manager.scheduled_session_token(scope)
+    assert manager.is_scheduled_session_current(scope, token)
+    with pytest.raises(PaperRuntimeNotReady, match="strategy version"):
+        manager.push_scheduled_completed_bar(scope, expected_strategy_version_id="b" * 64, bar="first")
+    with pytest.raises(PaperRuntimeConflict, match="deployment changed"):
+        manager.push_scheduled_completed_bar(scope, expected_strategy_version_id=runtime.version_id,
+                                             bar="first", is_current=lambda: False)
+    with pytest.raises(PaperExecutionManagerError):
+        manager.push_scheduled_completed_bar(_scope("other"), expected_strategy_version_id=runtime.version_id, bar="first")
+    manager.push_scheduled_completed_bar(scope, expected_strategy_version_id=runtime.version_id, bar="first")
+    assert bars == ["first"]
+
+    def reject(_bar):
+        raise ValueError("invalid bar")
+
+    runtime.push_completed_bar = reject
+    with pytest.raises(ValueError, match="invalid bar"):
+        manager.push_scheduled_completed_bar(scope, expected_strategy_version_id=runtime.version_id, bar="second")
+    assert runtime.service.state()[0] is ExecutionControlState.PAUSED
+    runtime.quiescent = True
+    assert manager.stop(scope, _principal())
+    assert not manager.is_scheduled_session_current(scope, token)
+
+
 def test_failed_session_recovery_uses_separate_grant_and_returns_paused(tmp_path):
     runtime = None
     actions = {"recover"}
@@ -469,6 +508,84 @@ def test_manager_cancel_has_separate_attributable_cancel_grant(tmp_path):
     )
     assert manager.cancel_owned_order(scope, "intent-1", _principal()) == "intent-1"
     assert runtime.cancelled_intents == ["intent-1"]
+
+
+def test_cancel_grant_outlives_entry_grant_without_authorizing_entry(tmp_path):
+    from src.execution.paper_control_grants import PaperControlGrantStore
+
+    now = [100]
+    grants = PaperControlGrantStore(tmp_path / "control.sqlite", clock=lambda: now[0])
+    scope = _scope()
+    actor = _principal()
+    for action, end in (("activate", 110), ("cancel", 130)):
+        grants.issue(
+            principal=actor, scope=scope, action=action, valid_from=90, valid_until=end,
+            issued_by=Principal("admin", AuthMethod.FEDERATED_IDENTITY),
+        )
+    runtime = FakePaperRuntime(scope, tmp_path / "cancel-after-entry.sqlite")
+    manager = PaperExecutionManager(runtime_factory=lambda _: runtime, control_authorizer=grants, startup_readiness=_ready())
+    manager.start(scope)
+    try:
+        now[0] = 110
+        with pytest.raises(PaperRuntimeAuthorizationError):
+            manager.activate(scope, actor)
+        assert manager.cancel_owned_order(scope, "intent-owned", actor) == "intent-owned"
+        assert runtime.activation_calls == 0
+        assert runtime.cancelled_intents == ["intent-owned"]
+        assert grants(actor, _scope("other-account"), "cancel") is False
+        now[0] = 130
+        with pytest.raises(PaperRuntimeAuthorizationError):
+            manager.cancel_owned_order(scope, "intent-owned", actor)
+    finally:
+        runtime.quiescent = True
+        manager.shutdown_active_runtime()
+
+
+def test_cancel_recovery_reconnects_only_matching_working_deployment_paused(tmp_path):
+    from types import SimpleNamespace
+    from src.execution.order_ledger import BrokerEventKind
+    from src.execution.paper_control_grants import PaperControlGrantStore
+    from tests.execution.test_order_ledger import VERSION, intent, report
+
+    scope = _scope("DU123")
+    ledger = SQLiteOrderLedger(tmp_path / "cancel-recovery.sqlite")
+    order = ledger.create_intent(intent(broker="IBKR", account_ref=scope.account_ref))
+    ledger.reserve(order.intent_id, "reservation", "123.45")
+    ledger.start_send(order.intent_id, attempt_id="attempt", client_order_id="client")
+    ledger.record_broker_event(report(order.intent_id, BrokerEventKind.ACK, "ack", broker="IBKR",
+                                      account_ref=scope.account_ref, broker_order_id="77"))
+    class Factory:
+        strategy_version_id = VERSION
+        session_builder = SimpleNamespace(deployment_id="wrong-deployment")
+        def __call__(self, actual_scope):
+            self.runtime = FakePaperRuntime(actual_scope, tmp_path / "cancel-recovery.sqlite")
+            return self.runtime
+    factory = Factory()
+    clock = [100]
+    grants = PaperControlGrantStore(tmp_path / "recovery-grants.sqlite", clock=lambda: clock[0])
+    for action, end in (("activate", 110), ("cancel", 130)):
+        grants.issue(principal=_principal(), scope=scope, action=action, valid_from=90, valid_until=end,
+                     issued_by=_principal())
+    clock[0] = 110
+    manager = PaperExecutionManager(runtime_factory=factory, startup_readiness=_ready(),
+                                    control_authorizer=grants)
+    manager.bind_stopped_activity(scope, ledger)
+    with pytest.raises(PaperRuntimeAuthorizationError):
+        manager.start_for_cancel_recovery(scope, _principal(attributable=False))
+    with pytest.raises(PaperRuntimeConflict, match="another PAPER deployment"):
+        manager.start_for_cancel_recovery(scope, _principal())
+    assert manager.status() is None
+    factory.session_builder.deployment_id = "deployment-1"
+    status = manager.start_for_cancel_recovery(scope, _principal())
+    try:
+        assert status.control_state is ExecutionControlState.PAUSED
+        assert factory.runtime.activation_calls == 0
+        with pytest.raises(PaperRuntimeAuthorizationError):
+            manager.activate(scope, _principal())
+        assert manager.cancel_owned_order(scope, order.intent_id, _principal()) == order.intent_id
+    finally:
+        factory.runtime.quiescent = True
+        manager.shutdown_active_runtime()
 
 
 def test_manager_status_surfaces_stable_runtime_health_code(tmp_path):

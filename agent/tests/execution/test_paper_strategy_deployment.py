@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 import backtrader
+import pytest
 
 from src.execution.event_worker import PYTHON_WORKER_COMPILER_VERSION
 from src.execution.paper_integration_test_strategy import build_paper_integration_test_spec
@@ -45,6 +46,7 @@ def test_selection_pins_verified_version_and_audits_operator_without_copying_acc
         now=datetime(2026, 10, 31, 16, 0, tzinfo=timezone.utc),
     )
     assert read_paper_integration_test_config(config_path).strategy_version_id == version.version_id
+    assert read_paper_integration_test_config(config_path).backtest_report_sha256 == receipt["report_sha256"]
     assert receipt["report_sha256"]
     commit_paper_strategy_selection(receipt)
 
@@ -65,6 +67,49 @@ def test_selection_can_roll_back_config_and_attestation_artifacts(tmp_path):
 
     assert config_path.read_bytes() == original
     assert not list((tmp_path / "paper-integration-test" / "backtests").glob("*.json"))
+
+
+def test_selection_binds_exact_requested_run_and_rejects_unknown_run(tmp_path):
+    version, _ = _candidate_root(tmp_path)
+    _write_run(tmp_path, version, "bt_another")
+    receipt = prepare_paper_strategy_selection(
+        version.version_id, run_id="bt_another", operator_subject="partner-dev", runtime_root=tmp_path,
+    )
+    assert receipt["run_id"] == "bt_another"
+    rollback_paper_strategy_selection(receipt)
+    with pytest.raises(ValueError, match="no verified Backtrader report"):
+        prepare_paper_strategy_selection(
+            version.version_id, run_id="bt_missing", operator_subject="partner-dev", runtime_root=tmp_path,
+        )
+
+
+def test_selection_pins_report_even_when_a_newer_report_exists(tmp_path):
+    from src.execution.paper_backtest_attestation import (
+        verify_paper_backtest_attestation, write_paper_backtest_attestation,
+    )
+
+    version, config_path = _candidate_root(tmp_path)
+    directory = tmp_path / "paper-integration-test" / "backtests"
+    directory.mkdir(parents=True)
+    newer = directory / f"20990101T000000Z-{version.version_id}.json"
+    different_report = _report(version)
+    different_report["fixture_note"] = "different report"
+    newer.write_text(json.dumps(different_report))
+    write_paper_backtest_attestation(newer, version_id=version.version_id)
+    receipt = prepare_paper_strategy_selection(
+        version.version_id, run_id="bt_20261031_120000_abcdef123456",
+        operator_subject="partner-dev", runtime_root=tmp_path,
+    )
+    config = read_paper_integration_test_config(config_path)
+    pinned = verify_paper_backtest_attestation(
+        directory, version=version, report_sha256=config.backtest_report_sha256,
+    )
+    assert pinned.report_sha256 == receipt["report_sha256"]
+    assert pinned.report_path != newer
+    assert verify_paper_backtest_attestation(directory, version=version).report_path == newer
+    pinned.report_path.unlink()
+    with pytest.raises(ValueError, match="no intact"):
+        verify_paper_backtest_attestation(directory, version=version, report_sha256=config.backtest_report_sha256)
 
 
 def test_selection_refuses_a_nonempty_order_ledger(tmp_path):

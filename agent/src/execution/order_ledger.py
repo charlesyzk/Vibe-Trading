@@ -1430,7 +1430,10 @@ class SQLiteOrderLedger:
                 # A cancellation/rejection remains visible after a late fill;
                 # fill facts still accumulate and are never discarded.
                 if state not in {LocalOrderState.CANCELLED, LocalOrderState.REJECTED}:
-                    state = LocalOrderState.FILLED if filled_qty == intent_qty else LocalOrderState.PARTIALLY_FILLED
+                    if filled_qty == intent_qty:
+                        state = LocalOrderState.FILLED
+                    elif state is not LocalOrderState.CANCEL_PENDING:
+                        state = LocalOrderState.PARTIALLY_FILLED
                 connection.execute(
                     "UPDATE order_intent SET state=?,filled_qty=?,fill_notional=?,reserved_amount=?,updated_at=CURRENT_TIMESTAMP WHERE intent_id=?",
                     (state.value, filled_qty, str(fill_notional), str(reserved_after_fill), event.intent_id),
@@ -1681,6 +1684,18 @@ class SQLiteOrderLedger:
                 "ORDER BY created_at DESC, intent_id DESC LIMIT ?",
                 (broker, account_ref, environment.value, limit),
             ).fetchall()
+            cancel_states = {
+                row["intent_id"]: row["state"]
+                for row in connection.execute(
+                    "SELECT c.intent_id,c.state FROM cancel_attempt c WHERE c.intent_id IN ("
+                    "SELECT intent_id FROM order_intent "
+                    "WHERE json_extract(body_json, '$.broker')=? "
+                    "AND json_extract(body_json, '$.account_ref')=? "
+                    "AND json_extract(body_json, '$.environment')=? "
+                    "ORDER BY created_at DESC, intent_id DESC LIMIT ?)",
+                    (broker, account_ref, environment.value, limit),
+                )
+            }
 
         activity: list[dict] = []
         for row in rows:
@@ -1729,6 +1744,7 @@ class SQLiteOrderLedger:
                 ),
                 "broker_order_id": order.broker_order_id,
                 "attempt_id": order.attempt_id,
+                "cancel_state": cancel_states.get(order.intent_id),
                 "intent": intent_data,
                 "fills": public_fills,
                 "fees": public_fees,

@@ -71,8 +71,14 @@ therefore security-significant.
   exactly matches the active backend origin.
 - An explicitly supplied `Bearer vtpo_…` operator token is preserved for PAPER
   routes on that same origin so the backend can attribute controls; it validates
-  the token and its action grants. Other supplied authorization values fall
-  back to the desktop's internal key, and duplicate header names are removed.
+  the token and its action grants. Other supplied authorization values are
+  replaced with the desktop credential for that route; duplicate header names
+  are removed.
+- For the generic PAPER draft workflow Electron also generates a distinct
+  in-memory per-launch token and binds it to the signed-in OS profile in the
+  backend. It is injected only for PAPER routes on the active backend origin.
+  This identifies the local profile, not a verified human, and does not grant
+  access to non-PAPER endpoints or human-only approval flows.
 - Health and shutdown requests are authenticated.
 - A new desktop process receives a new secret, so any stale value is invalid
   after exit.

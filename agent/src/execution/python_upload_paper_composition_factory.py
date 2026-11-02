@@ -101,6 +101,7 @@ def build_frozen_python_upload_paper_composition(
     queue_size: int = 256,
     idle_poll_seconds: float = 0.05,
     allow_unreported_usd_cash: bool = False,
+    initial_checkpoint: dict[str, Any] | None = None,
 ) -> PaperExecutionComposition:
     """Build one offline, exact-version Python-upload PAPER composition.
 
@@ -137,6 +138,7 @@ def build_frozen_python_upload_paper_composition(
         queue_size=queue_size,
         idle_poll_seconds=idle_poll_seconds,
         allow_unreported_usd_cash=allow_unreported_usd_cash,
+        initial_checkpoint=initial_checkpoint,
     )
     # Refuse incompatible frozen policies and contract/feed maps before the
     # composition can report readiness. These checks are local and side-effect

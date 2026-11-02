@@ -24,6 +24,7 @@ class PaperExecutionComposition:
     readiness: PaperExecutionReadiness
     scope: PaperRuntimeScope
     integration_test_runner: Callable[[Any], dict] | None = None
+    draft_runner: Callable[..., dict] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.manager, PaperExecutionManager):
@@ -34,6 +35,8 @@ class PaperExecutionComposition:
             raise TypeError("scope must be a trusted PaperRuntimeScope")
         if self.integration_test_runner is not None and not callable(self.integration_test_runner):
             raise TypeError("integration_test_runner must be callable or None")
+        if self.draft_runner is not None and not callable(self.draft_runner):
+            raise TypeError("draft_runner must be callable or None")
         runtime_factory = self.manager.runtime_factory
         strategy_version_id = getattr(runtime_factory, "strategy_version_id", None)
         if not isinstance(strategy_version_id, str) or not is_sha256(strategy_version_id):

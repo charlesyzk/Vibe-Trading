@@ -1,0 +1,90 @@
+name: Private PAPER Windows validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Restrict this review workflow to private repositories
+        if: ${{ !github.event.repository.private }}
+        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            desktop/electron/requirements-windows-lock.txt
+            desktop/electron/requirements-paper-windows-lock.txt
+            desktop/electron/requirements-ibkr-windows-lock.txt
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Verify staged official IBKR SDK
+        shell: pwsh
+        run: |
+          python scripts/install_ibapi_from_official_source.py --source-dir vendor/ibapi/pythonclient --verify-only
+          if ($LASTEXITCODE -ne 0) { throw 'The staged official SDK failed verification.' }
+          if (-not (Test-Path -LiteralPath vendor/ibapi/LICENSE -PathType Leaf)) { throw 'The official SDK license is missing.' }
+      - name: Build unsigned PAPER review installer
+        working-directory: desktop/electron
+        shell: pwsh
+        env:
+          NPM_CONFIG_AUDIT: 'false'
+          NPM_CONFIG_FUND: 'false'
+        run: |
+          .\scripts\build-paper-installer.ps1 -OfficialSourceDir "$env:GITHUB_WORKSPACE\vendor\ibapi\pythonclient" -OfficialLicenseFile "$env:GITHUB_WORKSPACE\vendor\ibapi\LICENSE" -BuildPython "${{ env.pythonLocation }}\python.exe"
+      - name: Exercise packaged WASI worker and upload backtest on Windows
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $runtime = Join-Path $env:GITHUB_WORKSPACE 'desktop\electron\runtime\backend'
+          $testDeps = Join-Path $env:RUNNER_TEMP 'paper-pytest'
+          python -m pip install --target $testDeps 'pytest==8.4.2'
+          if ($LASTEXITCODE -ne 0) { throw 'Installing the isolated test runner failed.' }
+          $fixture = Join-Path $env:RUNNER_TEMP 'wasi-test-fixture'
+          New-Item -ItemType Directory -Path (Join-Path $fixture 'bin'), (Join-Path $fixture 'usr\local\lib') -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $runtime 'wasi-runtime\python.wasm') -Destination (Join-Path $fixture 'bin\python-3.12.0.wasm')
+          Copy-Item -LiteralPath (Join-Path $runtime 'wasi-runtime\stdlib\python312.zip') -Destination (Join-Path $fixture 'usr\local\lib\python312.zip')
+          $env:VIBE_WASI_TEST_ROOT = $fixture
+          $env:VIBE_PYTEST_DEPS = $testDeps
+          $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
+          $env:PATH = (Join-Path $runtime 'gtk\bin') + [IO.Path]::PathSeparator + $env:PATH
+          $env:WEASYPRINT_DLL_DIRECTORIES = Join-Path $runtime 'gtk\bin'
+          $testScript = @'
+          import faulthandler, os, sys, threading
+          sys.path.insert(0, os.environ["VIBE_PYTEST_DEPS"])
+          sys.path.insert(0, os.path.join(os.environ["GITHUB_WORKSPACE"], "agent"))
+          import pytest
+          result = pytest.main(["agent/tests/execution/test_wasi_worker_host.py", "agent/tests/execution/test_python_sandbox.py", "agent/tests/bt_runtime/test_report_replay_subprocess.py", "agent/tests/execution/test_paper_daily_scheduler.py", "agent/tests/execution/test_paper_draft_runner.py", "agent/tests/execution/test_ibkr_callback_pump.py", "agent/tests/execution/test_managed_python_paper_session.py::test_daily_scheduler_drives_real_managed_session_across_two_days", "-q", "-o", "faulthandler_timeout=60"])
+          for thread in threading.enumerate():
+              print(f"POST-TEST THREAD name={thread.name!r} daemon={thread.daemon} alive={thread.is_alive()}", flush=True)
+          faulthandler.dump_traceback_later(15, repeat=True)
+          raise SystemExit(result)
+          '@
+          $testScript | & (Join-Path $runtime 'python.exe') -
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows WASI worker tests failed.' }
+      - name: Exercise clean install and same-version reinstall
+        working-directory: desktop/electron
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem -LiteralPath release -Filter 'Vibe-Trading-Desktop-Unofficial-*-x64.exe')
+          if ($installer.Count -ne 1) { throw 'Expected exactly one review installer.' }
+          .\scripts\smoke-paper-installer.ps1 -Installer $installer[0].FullName
+      - name: Upload unsigned review artifact and checksum
+        if: ${{ always() && github.event.repository.private }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-paper-windows-review
+          path: |
+            desktop/electron/release/Vibe-Trading-Desktop-Unofficial-*-x64.exe
+            desktop/electron/release/SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 7
