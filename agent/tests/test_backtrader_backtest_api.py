@@ -313,7 +313,7 @@ def test_ibkr_history_can_prepare_python_upload_csv_and_pinned_schedule(tmp_path
         requested.append((symbol, start, end, instrument_id, profile_id, port))
         schedule = build_xnys_schedule(start, end)
         index = pd.DatetimeIndex([pd.Timestamp(item.session_date) for item in schedule.sessions])
-        values = [100.0 + i for i in range(len(index))]
+        values = [334.35 + i for i in range(len(index))]
         frame = pd.DataFrame({
             "open": values, "high": [value + 1 for value in values],
             "low": [value - 1 for value in values], "close": values,
@@ -350,6 +350,10 @@ def test_ibkr_history_can_prepare_python_upload_csv_and_pinned_schedule(tmp_path
     assert result["market_data_metadata"]["calendar_schedule_sha256"]
     assert len(result["expected_sessions"]) == 5
     assert result["bar_count"] == 5
+    # Match the runtime adapter's Decimal(str(float)) conversion; expanding
+    # the binary float to 17 digits changes the exact price used for matching.
+    assert ",334.35," in result["market_data_csv"]
+    assert "334.35000000000002" not in result["market_data_csv"]
 
     upload_preview = client.post("/runs/backtests/python-upload/preview", json={
         "strategy_id": "ibkr_python_fixture",

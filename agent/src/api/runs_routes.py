@@ -2018,7 +2018,7 @@ def register_runs_routes(
                 close_at = session.close_at.isoformat()
                 writer.writerow((
                     session.session_date.isoformat(), open_at, close_at, close_at,
-                    *(format(float(row[key]), ".17g") for key in ("open", "high", "low", "close", "volume")),
+                    *(str(float(row[key])) for key in ("open", "high", "low", "close", "volume")),
                 ))
             market_data_csv = output.getvalue()
             if len(market_data_csv.encode("utf-8")) > 64 * 1024 * 1024:

@@ -238,6 +238,7 @@ describe("Execution page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use current or next market session" }));
     await waitFor(() => expect(screen.getByLabelText("Entry start")).toHaveValue("2026-11-02T14:30:00Z"));
     expect(screen.getByLabelText("Entry end")).toHaveValue("2026-11-02T21:00:00Z");
+    expect(screen.getAllByText(/Your device's local time/)).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "Check order evidence" }));
     await waitFor(() => expect(api.previewPaperOrder).toHaveBeenLastCalledWith(expect.objectContaining({
       setup: { valid_from: "2026-11-02T14:30:00Z", valid_until: "2026-11-02T21:00:00Z",
@@ -263,6 +264,12 @@ describe("Execution page", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start PAPER and process initial signal" }));
     await waitFor(() => expect(api.runPaperOrderDraft).toHaveBeenCalled());
     expect(await screen.findByText(/Initial signal queued/)).toBeInTheDocument();
+    vi.mocked(api.runPaperOrderDraft).mockRejectedValueOnce(new ApiError("PAPER entry window is closed", 409));
+    fireEvent.click(screen.getByRole("button", { name: "Start PAPER and process initial signal" }));
+    expect(await screen.findByText(/The entry window is closed/)).toBeInTheDocument();
+    vi.mocked(api.deployPaperOrderDraft).mockRejectedValueOnce(new ApiError("generic auth error", 403));
+    fireEvent.click(screen.getByRole("button", { name: "Deploy saved PAPER draft" }));
+    expect(await screen.findByText(/This action requires a named PAPER operator/)).toBeInTheDocument();
     expect(api.runPaperIntegrationTest).not.toHaveBeenCalled();
   });
 
@@ -928,6 +935,72 @@ describe("Execution page", () => {
     await act(async () => resolvePreview({ supported: false, clarification: "Stale preview response" }));
     expect(screen.queryByText("Stale preview response")).not.toBeInTheDocument();
     expect(screen.queryByText("Review this strategy")).not.toBeInTheDocument();
+  });
+
+  it("preserves the exact IBKR metadata when reviewing fetched PAPER data", async () => {
+    const originalText = File.prototype.text;
+    File.prototype.text = function () {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(this);
+      });
+    };
+    try {
+      const metadata = {
+        provider: "ibkr", instrument_id: "AAPL", currency: "USD", timezone: "America/New_York",
+        calendar_id: "XNYS", calendar_version: "4.13.2", calendar_schedule_sha256: "schedule-hash",
+        availability_model: "completed", adjustment_policy: "unverified", corporate_action_policy: "unverified",
+        fetched_at: "2026-11-02T12:00:00Z", warmup_start: "2025-02-03", warmup_end: "2025-02-03",
+        evaluation_start: "2025-02-04", evaluation_end: "2025-02-07",
+        download_parameters: { qualified_contract: { symbol: "AAPL", con_id: 123 } },
+      };
+      vi.mocked(api.previewIbkrPythonMarketData).mockResolvedValueOnce({
+        supported: true, market_data_csv: "daily data", market_data_metadata: metadata,
+        expected_sessions: [{ session_date: "2025-02-03", open_at: "open", close_at: "close" }],
+        ibkr_import_token: "proof-token", bar_count: 1,
+      });
+      vi.mocked(api.previewPythonUploadBacktest).mockResolvedValueOnce({ supported: false, reason: "fixture complete" });
+      renderExecution();
+      fireEvent.change(screen.getByLabelText("Strategy .py file"), { target: { files: [new File(["source"], "strategy.py")] } });
+      fireEvent.click(screen.getByRole("button", { name: "Fetch daily bars from IBKR" }));
+      await screen.findByText(/server-verified PAPER source proof attached/);
+      fireEvent.submit(screen.getByRole("button", { name: "Validate and review upload" }).closest("form")!);
+      await waitFor(() => expect(api.previewPythonUploadBacktest).toHaveBeenCalledWith(expect.objectContaining({
+        ibkr_import_token: "proof-token", market_data_metadata: metadata,
+      })));
+    } finally {
+      File.prototype.text = originalText;
+    }
+  });
+
+  it("allows a read-only IBKR import without a PAPER proof to reach offline preview", async () => {
+    const originalText = File.prototype.text;
+    File.prototype.text = function () {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(this);
+      });
+    };
+    try {
+      vi.mocked(api.previewIbkrPythonMarketData).mockResolvedValueOnce({
+        supported: true, market_data_csv: "daily data", market_data_metadata: { provider: "ibkr" },
+        expected_sessions: [{ session_date: "2025-02-03", open_at: "open", close_at: "close" }], bar_count: 1,
+      });
+      vi.mocked(api.previewPythonUploadBacktest).mockResolvedValueOnce({ supported: false, reason: "fixture complete" });
+      renderExecution();
+      fireEvent.change(screen.getByLabelText("Strategy .py file"), { target: { files: [new File(["source"], "strategy.py")] } });
+      fireEvent.change(screen.getByLabelText("IBKR read-only profile"), { target: { value: "ibkr-live-local-readonly" } });
+      fireEvent.click(screen.getByRole("button", { name: "Fetch daily bars from IBKR" }));
+      await screen.findByText(/IBKR bars loaded/);
+      fireEvent.submit(screen.getByRole("button", { name: "Validate and review upload" }).closest("form")!);
+      await waitFor(() => expect(api.previewPythonUploadBacktest).toHaveBeenCalledWith(expect.not.objectContaining({ ibkr_import_token: expect.anything() })));
+    } finally {
+      File.prototype.text = originalText;
+    }
   });
 
   it("uploads Python, completed-bar CSV, and a separate schedule to the isolated endpoint", async () => {

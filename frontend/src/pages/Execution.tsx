@@ -7,6 +7,13 @@ import { cn } from "@/lib/utils";
 import { api, ApiError, type PaperIntegrationTestResult, type PaperIntegrationTestStatus, type PaperStrategyCandidatesResponse } from "@/lib/api";
 import { useSSE, type SSEStatus } from "@/hooks/useSSE";
 
+function localWindowTime(value: string, locale: string): string | null {
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short", timeZoneName: undefined }).format(date);
+}
+
 const copy = {
   en: {
     eyebrow: "PAPER simulation · LIVE trading disabled",
@@ -75,6 +82,19 @@ const copy = {
     adjustment: "Adjustment policy",
     corporateAction: "Corporate-action policy",
     warmupStart: "Warm-up start",
+    dateHelp: "Warm-up builds strategy state without submitting orders; evaluation measures the strategy. All four dates must be trading days, and warm-up must end before evaluation starts.",
+    fetchedFiles: "IBKR supplied both the daily bars and session schedule. No file selection is needed.",
+    manualFiles: "Use manually selected files instead",
+    proofProblem: "The IBKR data proof expired or no longer matches. Check the symbol and dates, fetch daily bars again, then review within 10 minutes.",
+    paperAuthProblem: "This action requires a named PAPER operator. In Settings → Local API access, enter your operator token; a shared API key or localhost alone is not sufficient.",
+    deployFailed: "Could not deploy the saved draft. The previous deployment remains unchanged.",
+    startFailed: "Could not start the PAPER draft.",
+    entryClosed: "The entry window is closed. Check the saved draft's local-time window. If its latest completed bar has changed, fetch data and prepare a fresh backtest and draft.",
+    localTime: "Your device's local time",
+    savedWindowNote: "Changing these fields does not change the saved or deployed draft. Save and deploy again to apply changes.",
+    fixtureHeading: "About the separate synthetic sample",
+    pythonFlowHint: "First select a strategy and dates, then fetch IBKR bars and review within 10 minutes. The one-shot example contains a fixed signal date: update it to the latest completed session before testing, then fetch and backtest again.",
+    paperFlowHint: "1. Check order evidence → 2. Set window and limits → 3. Save the chosen report's draft → 4. Deploy → 5. Review and start during the window. Starting can submit a PAPER order.",
     usePaperDates: "Use selected PAPER backtest dates",
     usePaperDatesHint: "Uses the selected report's evaluation day and the previous XNYS session. Confirm that the evaluation day is still the latest completed session, then fetch bars again.",
     warmupEnd: "Warm-up end",
@@ -354,6 +374,19 @@ const copy = {
     adjustment: "复权规则",
     corporateAction: "公司行动规则",
     warmupStart: "暖机开始日期",
+    dateHelp: "暖机用历史数据准备策略状态，不提交订单；评估期用于检验策略。四个日期都须是交易日，暖机结束须早于评估开始。",
+    fetchedFiles: "已从 IBKR 自动准备日线和交易时段，无需选择下面的文件。",
+    manualFiles: "改为手动选择文件",
+    proofProblem: "IBKR 数据凭证已过期或与当前输入不一致。请核对代码和日期，重新获取日线，并在 10 分钟内预览。",
+    paperAuthProblem: "此操作需要具名 PAPER 操作员凭证。请在设置 → 本地 API 访问中填写操作员 token；仅使用普通 API 密钥或 localhost 不够。",
+    deployFailed: "草稿部署失败，原部署保持不变。",
+    startFailed: "PAPER 草稿启动失败。",
+    entryClosed: "当前不在开仓窗口内，请核对已保存草稿的本地时间。若最新完整日线已变化，请重新获取行情、回测并准备草稿。",
+    localTime: "设备本地时间",
+    savedWindowNote: "修改这些输入不会自动更改已保存或已部署的草稿；要生效须重新保存并部署。",
+    fixtureHeading: "关于单独的合成数据样例",
+    pythonFlowHint: "先选择策略并填写日期，再获取 IBKR 日线，10 分钟内预览。单笔联调示例的信号日期写在文件内；测试前须改为最新完整交易日，并重新取数和回测。",
+    paperFlowHint: "1 核对订单证据 → 2 设置时段和风险 → 3 保存所选报告的草稿 → 4 部署 → 5 在窗口内确认并启动。启动后可能提交 PAPER 委托。",
     usePaperDates: "使用当前 PAPER 回测日期",
     usePaperDatesHint: "填入已选报告的评估日和前一个 XNYS 交易日。请确认评估日仍为最新完整交易日，再重新获取日线。",
     warmupEnd: "暖机结束日期",
@@ -673,6 +706,7 @@ export function Execution() {
   const [pythonIbkrPort, setPythonIbkrPort] = useState<4001 | 4002 | 7496 | 7497>(4002);
   const [pythonIbkrBarCount, setPythonIbkrBarCount] = useState(0);
   const [pythonIbkrImportToken, setPythonIbkrImportToken] = useState<string | null>(null);
+  const [pythonIbkrMetadata, setPythonIbkrMetadata] = useState<Record<string, unknown> | null>(null);
   const [pythonPositionQuantity, setPythonPositionQuantity] = useState(1);
   const [pythonExecutionOrderType, setPythonExecutionOrderType] = useState<"market" | "limit">("limit");
   const [pythonLimitPriceUsd, setPythonLimitPriceUsd] = useState("400.00");
@@ -1023,7 +1057,8 @@ export function Execution() {
       setPaperDraftMessage(text.paperDraftDeployed);
       refreshPaperActivityRef.current();
     } catch (error) {
-      setPaperDraftMessage(`${text.paperCandidateSelectError}${error instanceof ApiError ? `: ${error.message}` : ""}`);
+      setPaperDraftMessage(error instanceof ApiError && (error.status === 401 || error.status === 403)
+        ? text.paperAuthProblem : `${text.deployFailed}${error instanceof ApiError ? `: ${error.message}` : ""}`);
     } finally {
       setPaperDeployBusy(false);
     }
@@ -1036,8 +1071,9 @@ export function Execution() {
       setPaperGatewayMessage(`${text.paperGatewayChecked}: ${result.account_ref} · ${result.connection}`);
       setPaperRuntime(await api.getPaperExecutionStatus());
       refreshPaperActivityRef.current();
-    } catch {
-      setPaperGatewayMessage(text.paperGatewayCheckFailed);
+    } catch (error) {
+      setPaperGatewayMessage(error instanceof ApiError && (error.status === 401 || error.status === 403)
+        ? text.paperAuthProblem : `${text.paperGatewayCheckFailed}${error instanceof ApiError ? `: ${error.message}` : ""}`);
     } finally {
       setPaperGatewayBusy(false);
     }
@@ -1056,7 +1092,9 @@ export function Execution() {
       setPaperRuntime(await api.getPaperExecutionStatus());
       setPaperDraftMessage(text.paperRunDraftQueued);
     } catch (error) {
-      setPaperDraftMessage(`${text.paperCandidateSelectError}${error instanceof ApiError ? `: ${error.message}` : ""}`);
+      setPaperDraftMessage(error instanceof ApiError && (error.status === 401 || error.status === 403)
+        ? text.paperAuthProblem : error instanceof ApiError && error.message.includes("PAPER entry window is closed")
+          ? text.entryClosed : `${text.startFailed}${error instanceof ApiError ? `: ${error.message}` : ""}`);
     }
   };
 
@@ -1223,6 +1261,7 @@ export function Execution() {
       strategy_source: strategySource,
       market_data_csv: marketDataCsv,
       market_data_metadata: {
+        ...(pythonIbkrImportToken && pythonIbkrMetadata ? pythonIbkrMetadata : {}),
         provider: metadata.provider,
         instrument_id: pythonInstrumentId.trim(),
         currency: metadata.currency,
@@ -1232,12 +1271,16 @@ export function Execution() {
         availability_model: metadata.availabilityModel,
         adjustment_policy: metadata.adjustmentPolicy,
         corporate_action_policy: metadata.corporateActionPolicy,
-        fetched_at: new Date().toISOString(),
+        fetched_at: pythonIbkrImportToken && typeof pythonIbkrMetadata?.fetched_at === "string"
+          ? pythonIbkrMetadata.fetched_at : new Date().toISOString(),
         warmup_start: metadata.warmupStart,
         warmup_end: metadata.warmupEnd,
         evaluation_start: metadata.evaluationStart,
         evaluation_end: metadata.evaluationEnd,
-        download_parameters: { submitted_via: "execution_page" },
+        download_parameters: pythonIbkrImportToken && pythonIbkrMetadata?.download_parameters
+          && typeof pythonIbkrMetadata.download_parameters === "object"
+          ? pythonIbkrMetadata.download_parameters as Record<string, unknown>
+          : { submitted_via: "execution_page" },
       },
       expected_sessions: expectedSessions as Parameters<typeof api.previewPythonUploadBacktest>[0]["expected_sessions"],
       ...(pythonIbkrImportToken ? { ibkr_import_token: pythonIbkrImportToken } : {}),
@@ -1276,6 +1319,7 @@ export function Execution() {
       setScheduleFile(new File([JSON.stringify(fetched.expected_sessions, null, 2)], "xnys_sessions.json", { type: "application/json" }));
       setPythonIbkrBarCount(fetched.bar_count ?? fetched.expected_sessions.length);
       setPythonIbkrImportToken(fetched.ibkr_import_token ?? null);
+      setPythonIbkrMetadata(fetched.ibkr_import_token ? nextMetadata : null);
       setMetadata((old) => ({
         ...old,
         provider: String(nextMetadata.provider ?? "ibkr"),
@@ -1288,7 +1332,8 @@ export function Execution() {
         corporateActionPolicy: String(nextMetadata.corporate_action_policy ?? ""),
       }));
     } catch (cause) {
-      setPythonError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setPythonError(message.includes("IBKR PAPER data proof") ? text.proofProblem : message);
     } finally {
       setPythonBusy(false);
     }
@@ -1305,6 +1350,10 @@ export function Execution() {
       setPythonError(text.pythonNoFiles);
       return;
     }
+    if (pythonIbkrMetadata && !pythonIbkrImportToken) {
+      setPythonError(text.proofProblem);
+      return;
+    }
     setPythonBusy(true);
     setPythonError("");
     setPythonReview(null);
@@ -1317,7 +1366,10 @@ export function Execution() {
       if (payload.ibkr_import_token) setPythonIbkrImportToken(null);
       if (generation === pythonPreviewGenerationRef.current) setPythonReview({ payload, preview });
     } catch (cause) {
-      if (generation === pythonPreviewGenerationRef.current) setPythonError(cause instanceof Error ? cause.message : String(cause));
+      if (generation === pythonPreviewGenerationRef.current) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setPythonError(message.includes("IBKR PAPER data proof") ? text.proofProblem : message);
+      }
     } finally {
       if (generation === pythonPreviewGenerationRef.current) setPythonBusy(false);
     }
@@ -1581,6 +1633,7 @@ export function Execution() {
         <section aria-labelledby="python-upload-title" className="rounded-xl border border-border/60 bg-card p-5 shadow-sm sm:p-6">
           <div className="flex flex-col gap-1">
             <h2 id="python-upload-title" className="text-lg font-semibold">{text.pythonUploadTitle}</h2>
+            <p className="text-xs text-muted-foreground">{text.pythonFlowHint}</p>
             <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
               <p className="max-w-4xl text-xs leading-relaxed text-muted-foreground">{text.pythonUploadDescription}</p>
               <a className="shrink-0 font-mono text-[10px] text-primary underline-offset-4 hover:underline" download="vibe_strategy_template.py" href="/templates/vibe_strategy_template.py">{text.downloadTemplate}</a>
@@ -1595,7 +1648,6 @@ export function Execution() {
             setReview(null);
             setClarificationAnswer("");
             setBusy(false);
-            setPythonIbkrBarCount(0);
           }}>
             <fieldset className="contents" disabled={pythonBusy || Boolean(pythonReview)}>
             <label className="text-xs font-medium">{text.strategyId}<input className={fieldClass} value={pythonStrategyId} maxLength={64} onChange={(event) => setPythonStrategyId(event.target.value)} required /></label>
@@ -1612,8 +1664,13 @@ export function Execution() {
             <label className="text-xs font-medium">{text.commissionRate}<input className={fieldClass} type="number" min="0" max="1" step="0.0001" value={commissionRate} onChange={(event) => setCommissionRate(Number(event.target.value))} required /></label>
             <label className="text-xs font-medium">{text.slippageFraction}<input className={fieldClass} type="number" min="0" max="0.25" step="0.0001" value={slippageFraction} onChange={(event) => setSlippageFraction(Number(event.target.value))} required /></label>
             <label className="text-xs font-medium">{text.pythonSourceFile}<input className={`${fieldClass} py-2`} type="file" accept=".py,text/x-python,text/plain" onChange={(event) => setPythonSourceFile(event.target.files?.[0] ?? null)} required /></label>
-            <label className="text-xs font-medium">{text.marketCsvFile}<input className={`${fieldClass} py-2`} type="file" accept=".csv,text/csv" onChange={(event) => setMarketCsvFile(event.target.files?.[0] ?? null)} required={!marketCsvFile} /></label>
-            <label className="text-xs font-medium sm:col-span-2">{text.scheduleFile}<input className={`${fieldClass} py-2`} type="file" accept=".json,application/json" onChange={(event) => setScheduleFile(event.target.files?.[0] ?? null)} required={!scheduleFile} /></label>
+            {pythonIbkrMetadata ? <div className="sm:col-span-2 lg:col-span-3 text-xs text-success" role="status">
+              {pythonIbkrImportToken ? text.fetchedFiles : text.proofProblem}
+              <button type="button" className="ml-2 underline" onClick={() => { setPythonIbkrImportToken(null); setPythonIbkrMetadata(null); setMarketCsvFile(null); setScheduleFile(null); setPythonIbkrBarCount(0); }}>{text.manualFiles}</button>
+            </div> : <>
+              <label className="text-xs font-medium">{text.marketCsvFile}<input className={`${fieldClass} py-2`} type="file" accept=".csv,text/csv" onChange={(event) => setMarketCsvFile(event.target.files?.[0] ?? null)} required={!marketCsvFile} /></label>
+              <label className="text-xs font-medium sm:col-span-2">{text.scheduleFile}<input className={`${fieldClass} py-2`} type="file" accept=".json,application/json" onChange={(event) => setScheduleFile(event.target.files?.[0] ?? null)} required={!scheduleFile} /></label>
+            </>}
             <label className="text-xs font-medium">{text.provider}<input className={fieldClass} value={metadata.provider} onChange={(event) => setMetadata((old) => ({ ...old, provider: event.target.value }))} required /></label>
             <label className="text-xs font-medium">{text.currency}<input className={fieldClass} value={metadata.currency} maxLength={8} onChange={(event) => setMetadata((old) => ({ ...old, currency: event.target.value }))} required /></label>
             <label className="text-xs font-medium">{text.timezone}<input className={fieldClass} value={metadata.timezone} onChange={(event) => setMetadata((old) => ({ ...old, timezone: event.target.value }))} required /></label>
@@ -1626,6 +1683,7 @@ export function Execution() {
             <label className="text-xs font-medium">{text.warmupEnd}<input className={fieldClass} type="date" value={metadata.warmupEnd} onChange={(event) => setMetadata((old) => ({ ...old, warmupEnd: event.target.value }))} required /></label>
             <label className="text-xs font-medium">{text.evaluationStart}<input className={fieldClass} type="date" value={metadata.evaluationStart} onChange={(event) => setMetadata((old) => ({ ...old, evaluationStart: event.target.value }))} required /></label>
             <label className="text-xs font-medium">{text.evaluationEnd}<input className={fieldClass} type="date" value={metadata.evaluationEnd} onChange={(event) => setMetadata((old) => ({ ...old, evaluationEnd: event.target.value }))} required /></label>
+            <p className="text-xs text-muted-foreground sm:col-span-2 lg:col-span-4">{text.dateHelp}</p>
             {paperIntegrationTest?.backtest_attestation?.status === "verified" && paperIntegrationTest.backtest_attestation.evaluation_end && paperIntegrationTest.backtest_attestation.suggested_warmup_date && (
               <div className="sm:col-span-2 lg:col-span-4">
                 <button type="button" className="rounded-md border border-primary/40 px-3 py-1.5 text-xs text-primary" onClick={() => {
@@ -1991,6 +2049,7 @@ export function Execution() {
                 {(paperRuntime?.configured === true || paperActivity !== null) && (
                   <div className="mt-3 rounded-lg border border-border/70 bg-background/70 p-4" aria-label={text.paperCandidatesTitle}>
                     <h3 className="text-xs font-semibold">{text.paperCandidatesTitle}</h3>
+                    <p className="mt-1.5 text-xs text-muted-foreground">{text.paperFlowHint}</p>
                     <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">{text.paperCandidatesDescription}</p>
                     <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">{text.paperDeployGrantHint}</p>
                     <button type="button" className="mt-2 rounded border border-border px-2 py-1 text-xs" onClick={() => void restorePaperDraft()}>{text.paperLoadDraft}</button>
@@ -2003,13 +2062,15 @@ export function Execution() {
                     </label>
                     {paperSetupEnabled && <div className="mt-2 space-y-2">
                       <p className="text-xs text-muted-foreground">{text.paperSetupHint}</p>
+                      <p className="text-xs text-muted-foreground">{text.savedWindowNote}</p>
                       <button type="button" className="rounded border border-border px-2 py-1 text-xs" onClick={() => void suggestPaperWindow()}>{text.paperSuggestWindow}</button>
                       <div className="grid gap-2 sm:grid-cols-2">
                         {text.paperSetupFields.map((label, index) => <label key={label} className="text-xs text-muted-foreground">
                           {label}
-                          <input className="mt-1 block w-full rounded border border-border bg-background px-2 py-1" value={paperSetupValues[index]} onChange={(event) => {
+                          <input aria-label={label} className="mt-1 block w-full rounded border border-border bg-background px-2 py-1" value={paperSetupValues[index]} onChange={(event) => {
                             const next = [...paperSetupValues]; next[index] = event.target.value; setPaperSetupValues(next); setPaperPreviewResult(null);
                           }} />
+                          {index < 2 && localWindowTime(paperSetupValues[index], i18n.resolvedLanguage || "en") && <span className="mt-1 block">{text.localTime} ({Intl.DateTimeFormat().resolvedOptions().timeZone}): {localWindowTime(paperSetupValues[index], i18n.resolvedLanguage || "en")}</span>}
                         </label>)}
                       </div>
                     </div>}
@@ -2074,7 +2135,7 @@ export function Execution() {
 
               <div className="mt-4 rounded-md border border-warning/30 bg-warning/5 p-3.5">
                 <div className="flex items-center gap-2 text-xs font-semibold text-warning">
-                  <AlertTriangle className="h-3.5 w-3.5" /> {text.warning}
+                  <AlertTriangle className="h-3.5 w-3.5" /> {text.fixtureHeading}: {text.warning}
                 </div>
                 <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{text.warningDetail}</p>
               </div>
